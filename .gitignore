@@ -1,0 +1,15 @@
+# venv
+.venv/
+
+# python
+__pycache__/
+*.pyc
+
+# logs / audio / models
+*.wav
+recordings/
+models/
+*.log
+
+# secrets
+.env
