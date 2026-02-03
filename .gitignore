@@ -13,3 +13,5 @@ models/
 
 # secrets
 .env
+
+.code-workspace
