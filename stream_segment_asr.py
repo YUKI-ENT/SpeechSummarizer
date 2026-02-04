@@ -67,15 +67,18 @@ def transcribe_float32_audio(audio_f32_16k: np.ndarray,
                              asr_device: str,
                              compute_type: str) -> str:
     model = get_model(model_size, asr_device, compute_type)
+
+    hot = "咳, 痰, 鼻水, 喉, 発熱, 下痢, 嘔吐, 腹痛, めまい, 耳鳴り, 出血"
     segments, _info = model.transcribe(
         audio_f32_16k,
         language=language,
         vad_filter=False,  # ここは既に分割済みなので不要
-        beam_size=5,
+        beam_size=10,
         temperature=0.0,
-        condition_on_previous_text=False,
-        initial_prompt="これは日本語の医療現場の会話です。聞こえたとおりに書き起こしてください。定型句で補完しないでください。",
-        hotwords="咳 せき 咳嗽 痰 たん 鼻水 はなみず 喉 のど 発熱 ねつ 下痢 嘔吐 腹痛 めまい 耳なり 出血"
+        condition_on_previous_text=True,
+        initial_prompt= ( "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。"
+                         f" 症状語: {hot}。"
+        )
     )
     texts = []
     for seg in segments:
