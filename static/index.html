@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8" />
+  <title>Recorder WS</title>
+  <style>
+    body { font-family: sans-serif; padding: 16px; }
+    button { padding: 10px 16px; margin-right: 8px; }
+    #log { white-space: pre-wrap; border: 1px solid #ccc; padding: 8px; height: 220px; overflow: auto; }
+    .small { color: #666; }
+  </style>
+</head>
+<body>
+  <h2>ブラウザ録音 → WS → サーバ無音分割 → WAV保存</h2>
+  <button id="btnStart">Start</button>
+  <button id="btnStop" disabled>Stop</button>
+  <span class="small">Level: <span id="level">-</span> dBFS</span>
+
+  <h3>ログ</h3>
+  <div id="log"></div>
+
+  <h3>認識テキスト</h3>
+    <div id="transcript" style="white-space:pre-wrap;border:1px solid #ccc;padding:8px;min-height:120px;"></div>
+
+<script>
+const logEl = document.getElementById("log");
+const levelEl = document.getElementById("level");
+const btnStart = document.getElementById("btnStart");
+const btnStop  = document.getElementById("btnStop");
+
+function log(s){ logEl.textContent += s + "\n"; logEl.scrollTop = logEl.scrollHeight; }
+
+let ws = null;
+let audioCtx = null, srcNode = null, procNode = null, stream = null;
+
+const targetSampleRate = 48000;
+const chunkSamples = 2400; // 50ms @48k
+let pcmBuf = new Float32Array(0);
+
+function appendBuf(a, b){
+  const out = new Float32Array(a.length + b.length);
+  out.set(a, 0); out.set(b, a.length);
+  return out;
+}
+
+btnStart.onclick = async () => {
+  try {
+    const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = "arraybuffer";
+
+    ws.onopen = () => log("[ws] open");
+    ws.onclose = () => log("[ws] close");
+    ws.onerror = (e) => log("[ws] error " + e);
+
+    let transcript = "";
+
+    ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+
+        if (msg.type === "level") levelEl.textContent = msg.dbfs;
+
+        if (msg.type === "saved") {
+            log(`[saved] ${msg.wav} dur=${msg.dur}s`);
+        }
+
+        if (msg.type === "asr") {
+            if (msg.text) {
+            transcript += (transcript ? " " : "") + msg.text;
+            document.getElementById("transcript").textContent = transcript;
+            }
+            log(`[asr] seg#${msg.seg_id} ${msg.text || "(empty)"}  meta=${JSON.stringify(msg.meta)}`);
+        }
+
+        if (msg.type === "status") log("[status] " + msg.msg);
+        if (msg.type === "error") log("[error] " + JSON.stringify(msg));
+    };
+
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false,
+        noiseSuppression: false,
+        autoGainControl: false,
+        channelCount: 1,
+        sampleRate: targetSampleRate
+      }
+    });
+
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
+    srcNode = audioCtx.createMediaStreamSource(stream);
+
+    const bufferSize = 2048;
+    procNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+    procNode.onaudioprocess = (ev) => {
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const input = ev.inputBuffer.getChannelData(0);
+      pcmBuf = appendBuf(pcmBuf, input);
+
+      while (pcmBuf.length >= chunkSamples) {
+        const chunk = pcmBuf.slice(0, chunkSamples);
+        pcmBuf = pcmBuf.slice(chunkSamples);
+
+        // Float32Array -> ArrayBuffer
+        ws.send(chunk.buffer);
+      }
+    };
+
+    srcNode.connect(procNode);
+    procNode.connect(audioCtx.destination);
+
+    btnStart.disabled = true;
+    btnStop.disabled = false;
+    log("recording start");
+  } catch (e) {
+    log("ERROR: " + e);
+  }
+};
+
+btnStop.onclick = async () => {
+  try {
+    if (procNode) procNode.disconnect();
+    if (srcNode) srcNode.disconnect();
+    if (audioCtx) await audioCtx.close();
+    if (stream) stream.getTracks().forEach(t => t.stop());
+
+    procNode=null; srcNode=null; audioCtx=null; stream=null;
+
+    if (ws) { ws.close(); ws=null; }
+
+    btnStart.disabled = false;
+    btnStop.disabled = true;
+    log("recording stop");
+  } catch (e) {
+    log("ERROR: " + e);
+  }
+};
+</script>
+</body>
+</html>
