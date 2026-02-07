@@ -10,6 +10,8 @@ __pycache__/
 recordings/
 models/
 *.log
+*.jsonl
+*.txt
 
 # secrets
 .env

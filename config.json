@@ -1,0 +1,25 @@
+{
+  "dyna_watch_dir": "/home/yuki/DynaID",
+  "dyna_glob": "dyna*.txt",
+  "delete_after_read": true,
+
+  "outputs_dir": "data/sessions",
+  "wav_dir": "data/wav",
+
+  "asr": {
+    "enabled": true,
+    "model_path": "/home/yuki/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/snapshots/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+    "language": "ja",
+    "device": "cuda",
+    "compute_type": "float16",
+    "beam_size": 10,
+    "temperature": 0.0,
+    "condition_on_previous_text": true
+  },
+  "port": 8000,
+  "ssl": {
+    "enabled": true,
+    "certfile": "certs/cert.pem",
+    "keyfile": "certs/key.pem"
+  }
+}
