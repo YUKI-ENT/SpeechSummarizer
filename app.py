@@ -10,7 +10,7 @@ import asyncio
 from pathlib import Path
 
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import uvicorn
@@ -207,6 +207,35 @@ ASR_TEMP = float(ASR_CFG.get("temperature", 0.0))
 ASR_COPT = bool(ASR_CFG.get("condition_on_previous_text", False))
 
 # -------------------------
+# ASR model registry (models.json)
+# -------------------------
+MODELS_PATH = Path("models.json")
+ASR_MODEL_ID = ASR_CFG.get("model_id")  # config.json側にあれば使う（なくてもOK）
+
+def load_models_registry() -> dict[str, str]:
+    if not MODELS_PATH.exists():
+        return {}
+    try:
+        with open(MODELS_PATH, "r", encoding="utf-8") as f:
+            d = json.load(f)
+        # 念のため文字列だけにする
+        out = {}
+        for k, v in (d or {}).items():
+            if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
+                out[k.strip()] = v.strip()
+        return out
+    except Exception as e:
+        log(f"[ASR] models.json load failed: {e}")
+        return {}
+
+MODELS_REGISTRY = load_models_registry()
+
+# 起動時に model_id が指定されていて、models.jsonにあるなら優先
+if ASR_MODEL_ID and ASR_MODEL_ID in MODELS_REGISTRY:
+    ASR_MODEL = MODELS_REGISTRY[ASR_MODEL_ID]
+
+
+# -------------------------
 # Whisper model cache
 # -------------------------
 _MODEL = None
@@ -218,6 +247,24 @@ def get_model() -> WhisperModel:
         _MODEL = WhisperModel(ASR_MODEL, device=ASR_DEVICE, compute_type=ASR_COMPUTE)
         log("[ASR] model loaded")
     return _MODEL
+
+def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
+    """
+    models.json のキーを受け取り、ASR_MODEL を差し替え、WhisperModelキャッシュを破棄する。
+    """
+    global ASR_MODEL, ASR_MODEL_ID, _MODEL, MODELS_REGISTRY
+
+    MODELS_REGISTRY = load_models_registry()  # ついでにリロード（models.json編集しても反映）
+    if model_id not in MODELS_REGISTRY:
+        return (False, f"unknown model_id: {model_id}")
+
+    ASR_MODEL_ID = model_id
+    ASR_MODEL = MODELS_REGISTRY[model_id]
+
+    # ここが重要：モデルキャッシュ破棄（次のASRで再ロード）
+    _MODEL = None
+    log(f"[ASR] model switched -> id={ASR_MODEL_ID} path={ASR_MODEL}")
+    return (True, "ok")
 
 # -------------------------
 # dyna watcher
@@ -344,6 +391,33 @@ async def index():
 async def _startup():
     asyncio.create_task(dyna_watch_task())
     log("[APP] startup complete")
+
+@app.get("/api/asr/models")
+async def api_asr_models():
+    # 毎回リロード（models.json編集に追従）
+    reg = load_models_registry()
+    current_id = ASR_MODEL_ID if ASR_MODEL_ID else None
+
+    # current_id が未設定なら、ASR_MODELの値から逆引きできるものがあればセット
+    if not current_id and reg:
+        for k, v in reg.items():
+            if v == ASR_MODEL:
+                current_id = k
+                break
+
+    return {
+        "current": current_id,
+        "models": [{"id": k, "label": k} for k in sorted(reg.keys())],
+    }
+
+@app.post("/api/asr/model")
+async def api_asr_set_model(payload: dict = Body(...)):
+    model_id = (payload.get("id") or "").strip()
+    ok, msg = set_asr_model_by_id(model_id)
+    if not ok:
+        return {"ok": False, "error": msg}
+
+    return {"ok": True, "current": ASR_MODEL_ID}
 
 # -------------------------
 # Per-connection state

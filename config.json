@@ -8,6 +8,7 @@
 
   "asr": {
     "enabled": true,
+    "model_id": "large-v3-turbo",
     "model_path": "/home/yuki/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/snapshots/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
     "language": "ja",
     "device": "cuda",

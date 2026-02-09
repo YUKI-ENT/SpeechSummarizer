@@ -247,6 +247,19 @@
       color: rgba(255,255,255,0.80);
     }
 
+    /* ASRモデルselectを確実に読めるようにする */
+    #selAsrModel {
+      color: #fff !important;
+      background: rgba(80,170,255,0.18)!important;
+      border: 1px solid rgba(0,0,0,.25);
+    }
+
+    /* ドロップダウンの候補（OSによって効かない場合あり） */
+    #selAsrModel option {
+      color: #fff;
+      background: #0b1633;
+    }
+
     /* =========================
        Hearing Mode (字幕フルスクリーン寄り)
        ========================= */
@@ -310,6 +323,10 @@
       <button class="btn btn-primary" id="btnStart">Start</button>
       <button class="btn btn-danger" id="btnStop" disabled>Stop</button>
 
+      <select id="selAsrModel" class="btn" style="padding:10px 12px; min-width: 140px;">
+        <option value="">ASR model...</option>
+      </select>
+
       <label class="toggle" title="患者さんに見せる字幕を巨大化します">
         <input type="checkbox" id="chkHearing">
         難聴モード
@@ -364,6 +381,61 @@
   const patientIdNavEl = document.getElementById("patientIdNav");
 
   const chkHearing = document.getElementById("chkHearing");
+
+  const selAsrModel = document.getElementById("selAsrModel");
+
+  async function loadAsrModels(){
+    try{
+      const r = await fetch("/api/asr/models");
+      const j = await r.json();
+
+      // options rebuild
+      selAsrModel.innerHTML = "";
+      const opt0 = document.createElement("option");
+      opt0.value = "";
+      opt0.textContent = "ASR model...";
+      selAsrModel.appendChild(opt0);
+
+      (j.models || []).forEach(m => {
+        const opt = document.createElement("option");
+        opt.value = m.id;
+        opt.textContent = m.label;
+        selAsrModel.appendChild(opt);
+      });
+
+      if (j.current){
+        selAsrModel.value = j.current;
+      }
+      log(`[ui] ASR models loaded (current=${j.current || "n/a"})`);
+    }catch(e){
+      log(`[ui] loadAsrModels failed: ${e}`);
+    }
+  }
+
+  selAsrModel.addEventListener("change", async () => {
+    const id = selAsrModel.value;
+    if(!id) return;
+    try{
+      const r = await fetch("/api/asr/model", {
+        method: "POST",
+        headers: {"Content-Type":"application/json"},
+        body: JSON.stringify({id})
+      });
+      const j = await r.json();
+      if(j.ok){
+        log(`[ui] ASR model switched -> ${j.current}`);
+      }else{
+        log(`[ui] ASR model switch failed: ${j.error}`);
+        await loadAsrModels(); // 戻す
+      }
+    }catch(e){
+      log(`[ui] ASR model switch error: ${e}`);
+      await loadAsrModels();
+    }
+  });
+
+  // 起動時に読み込む
+  loadAsrModels();
 
   function log(s){
     logEl.textContent += s + "\n";

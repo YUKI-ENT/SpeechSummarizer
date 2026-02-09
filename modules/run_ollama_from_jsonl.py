@@ -120,6 +120,7 @@ def main() -> None:
     ap.add_argument("--include-meta", action="store_true", help="入力にseg_id/qualityを含める")
     ap.add_argument("--temperature", type=float, default=0.0)
     ap.add_argument("--top-p", type=float, default=1.0)
+
     args = ap.parse_args()
 
     in_path = Path(args.jsonl)
@@ -145,7 +146,8 @@ def main() -> None:
 
     print(f"[info] input_asr_lines={len(asr_items)} model={cfg.model} host={cfg.host}")
     try:
-        parsed, raw = ollama_generate_json(cfg, prompt)
+        parsed, raw = ollama_generate_json(cfg, prompt, temperature=args.temperature, top_p=args.top_p)
+
     except OllamaError as e:
         raise SystemExit(f"OllamaError: {e}")
 
