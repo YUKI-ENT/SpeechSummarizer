@@ -12,9 +12,12 @@ from pathlib import Path
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 from faster_whisper import WhisperModel
+
+from urllib.parse import unquote
+import re
 
 # -------------------------
 # Config
@@ -378,6 +381,23 @@ async def dyna_watch_task():
             await asyncio.sleep(1.0)
 
 # -------------------------
+# データ表示
+# -------------------------
+SESSION_TXT_RE = re.compile(r"^(?P<patient_id>[^_]+)_(?P<stamp>\d{8}_\d{6})\.txt$")
+
+def _list_session_txt_files() -> list[Path]:
+    # OUTPUTS_DIR は既に app.py 内で定義されている前提（data/sessions）
+    files = sorted(OUTPUTS_DIR.glob("*.txt"))
+    return files
+
+def _parse_session_name(name: str):
+    m = SESSION_TXT_RE.match(name)
+    if not m:
+        return None
+    return m.group("patient_id"), m.group("stamp")
+
+
+# -------------------------
 # Web
 # -------------------------
 app = FastAPI()
@@ -418,6 +438,48 @@ async def api_asr_set_model(payload: dict = Body(...)):
         return {"ok": False, "error": msg}
 
     return {"ok": True, "current": ASR_MODEL_ID}
+
+@app.get("/api/sessions")
+def api_sessions():
+    items = []
+    for p in _list_session_txt_files():
+        info = _parse_session_name(p.name)
+        if not info:
+            continue
+        patient_id, stamp = info
+        # stamp: YYYYMMDD_HHMMSS
+        items.append({
+            "name": p.name,               # 例: 16231_20260209_121559.txt
+            "patient_id": patient_id,     # 例: 16231
+            "stamp": stamp,               # 例: 20260209_121559
+            "label": f"{patient_id} / {stamp[:8]} {stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}",
+        })
+
+    # 新しい順（stamp降順）
+    items.sort(key=lambda x: x["stamp"], reverse=True)
+    return {"items": items}
+
+@app.get("/api/session/{name}")
+def api_session_get(name: str):
+    # URLエンコード対策
+    name = unquote(name)
+
+    # 安全のため、ファイル名だけ許可
+    info = _parse_session_name(name)
+    if not info:
+        return JSONResponse({"error": "invalid session name"}, status_code=400)
+
+    p = (OUTPUTS_DIR / name).resolve()
+    # ディレクトリ外参照ブロック
+    if OUTPUTS_DIR.resolve() not in p.parents:
+        return JSONResponse({"error": "invalid path"}, status_code=400)
+
+    if not p.exists():
+        return JSONResponse({"error": "not found"}, status_code=404)
+
+    text = p.read_text(encoding="utf-8", errors="replace")
+    patient_id, stamp = info
+    return {"name": name, "patient_id": patient_id, "stamp": stamp, "text": text}
 
 # -------------------------
 # Per-connection state
