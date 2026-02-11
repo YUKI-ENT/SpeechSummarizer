@@ -7,12 +7,61 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional
 
-from .llm_ollama import (
-    OllamaConfig,
-    build_s_extraction_prompt,
-    ollama_generate_json,
-    OllamaError,
-)
+try:
+    # package layout: modules/
+    from .llm_ollama import (
+        OllamaConfig,
+        build_s_extraction_prompt,
+        ollama_generate_json,
+        build_prompt,
+        ollama_generate_text,
+        OllamaError,
+    )
+except Exception:
+    # flat layout (script)
+    from llm_ollama import (
+        OllamaConfig,
+        build_s_extraction_prompt,
+        ollama_generate_json,
+        build_prompt,
+        ollama_generate_text,
+        OllamaError,
+    )
+
+
+def summarize_soap_from_jsonl(
+    jsonl_path: Path,
+    *,
+    cfg: OllamaConfig,
+    min_quality: str = "good",
+    max_lines: Optional[int] = None,
+    include_meta: bool = False,
+    prompts_path: str | None = None,
+    prompt_id: str = "soap_v1",
+) -> Dict[str, Any]:
+    """JSONL(ASRログ)からSOAP要約を生成して返す。
+
+    戻り値: {ok, summary, model, host, elapsed_sec, input_lines, input_preview, prompt_id}
+    """
+    asr_items = collect_asr_lines(jsonl_path, min_quality=min_quality, max_lines=max_lines)
+    if not asr_items:
+        raise OllamaError("ASR items not found (check min_quality or file content)")
+
+    asr_text = build_asr_input_text(asr_items, include_meta=include_meta)
+    prompts_path = prompts_path or "llm.json"
+    prompt = build_prompt(prompt_id, asr_text, path=prompts_path)
+
+    summary, raw = ollama_generate_text(cfg, prompt)
+
+    return {
+        "ok": True,
+        "summary": summary,
+        "model": cfg.model,
+        "host": cfg.host,
+        "elapsed_sec": raw.get("_elapsed_sec"),
+        "input_lines": len(asr_items),
+        "input_preview": asr_text[:1000],
+    }
 
 
 def iter_jsonl(path: Path) -> Iterable[Dict[str, Any]]:

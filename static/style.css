@@ -21,9 +21,13 @@
       --page-bottom: 18px;
 
       /* Transcript sizing */
-      --tx-size: 22px;
-      --tx-line: 1.7;
-      --tx-min-h: 340px;
+      --tx-size: 12px;
+      --tx-line: 1.2;
+      --tx-min-h: 140px;
+      /* summary用（SOAP結果） */
+      --sum-size: 18px;
+      --sum-line: 1.4;
+      --sum-min-h: 360px;
     }
 
     *{ box-sizing: border-box; }
@@ -309,7 +313,7 @@
 
     textarea.transcript{
       width: 100%;
-      min-height: 220px;
+      min-height: var(--tx-min-h);
       resize: vertical;
 
       padding: 12px;
@@ -318,9 +322,37 @@
       background: rgba(255,255,255,0.06);
       color: #fff;
 
-      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
-      line-height: 1.5;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+      font-size: var(--tx-size);
+      line-height: var(--tx-line);
+
       white-space: pre-wrap;
+    }
+
+
+    /* Summary (SOAP) */
+    textarea.summary{
+      width: 100%;
+      min-height: var(--sum-min-h);
+      resize: vertical;
+
+      padding: 12px;
+      border-radius: 16px;
+      border: 1px solid rgba(255,255,255,0.10);
+      background: rgba(0,0,0,0.25);
+      color: #fff;
+
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+
+      font-size: var(--sum-size);
+      line-height: var(--sum-line);
+
+      white-space: pre-wrap;
+    }
+
+    body.hearing .summary-block{
+      display: none;
     }
 
     .meta-row{
@@ -338,3 +370,58 @@
       opacity:.6;
     }
 
+
+
+
+/* --- SOAP header controls --- */
+.hd.summary-block{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.hd.summary-block .hd-left{
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  min-width: 0;
+}
+.hd.summary-block .hd-actions{
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.select-sm{
+  padding: 8px 10px;
+  min-width: 160px;
+  font-size: 13px;
+}
+.btn-sm{
+  padding: 8px 10px;
+  font-size: 13px;
+}
+
+
+/* --- Select Dark Theme --- */
+select.select, select.btn{
+  color: #fff;
+  background: rgba(0,0,0,0.30);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 12px;
+  outline: none;
+}
+select.select:focus, select.btn:focus{
+  border-color: rgba(255,255,255,0.30);
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
+}
+select.select option, select.btn option{
+  background: #0c1022;
+  color: #fff;
+}
+/* iOS/Safariなどで矢印が薄い場合のため */
+select.select, select.btn{
+  -webkit-appearance: none;
+  appearance: none;
+}

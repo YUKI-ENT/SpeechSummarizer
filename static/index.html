@@ -63,6 +63,22 @@
       <div class="bd">
         <textarea id="transcript" class="transcript" spellcheck="false"></textarea>
       </div>
+
+      <div class="hd summary-block">
+  <div class="hd-left">
+    <h3>SOAP要約</h3>
+    <div class="muted2">ollama</div>
+  </div>
+  <div class="hd-actions">
+    <select id="selLlmModel" class="select select-sm" title="LLMモデル"><option value="">LLM model...</option></select>
+    <select id="selSoapPrompt" class="select select-sm" title="プロンプト"><option value="">Prompt...</option></select>
+    <button class="btn btn-primary btn-sm" id="btnSoap" title="OllamaでSOAP要約">要約</button>
+    <button class="btn btn-sm" id="btnCopySoap" title="SOAPをコピー">Copy</button>
+  </div>
+</div>
+      <div class="bd summary-block">
+        <textarea id="summary" class="summary" spellcheck="false" placeholder="SOAP要約をここに表示"></textarea>
+      </div>
     </div>
 
     <!-- Right: log -->

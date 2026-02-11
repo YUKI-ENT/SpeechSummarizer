@@ -4,9 +4,11 @@ from __future__ import annotations
 import json
 import re
 import time
+import os
+import json
 from dataclasses import dataclass
 from typing import Any, Dict, Optional, Tuple
-
+from pathlib import Path
 import httpx
 
 
@@ -15,10 +17,42 @@ class OllamaConfig:
     host: str = "http://127.0.0.1:11434"
     model: str = "gemma3:12b"
     timeout_sec: float = 120.0
+    temperature: float = 0.0
+    top_p: float = 0.9
 
 
 class OllamaError(RuntimeError):
     pass
+
+
+
+def list_ollama_models(host: str, timeout_sec: float = 10.0) -> Tuple[list[str], float]:
+    """
+    Ollama の /api/tags からモデル一覧を取得する。
+    戻り値: (models, elapsed_sec)
+    """
+    url = host.rstrip("/") + "/api/tags"
+    t0 = time.time()
+    try:
+        with httpx.Client(timeout=timeout_sec) as client:
+            r = client.get(url)
+            r.raise_for_status()
+            j = r.json()
+    except Exception as e:
+        raise OllamaError(f"/api/tags 取得失敗: {e}") from e
+
+    models: list[str] = []
+    for it in (j.get("models") or []):
+        name = it.get("name") or it.get("model")  # 念のため
+        if name:
+            models.append(str(name))
+    # 文字列配列の形式で返してくる実装もあるため保険
+    if not models and isinstance(j.get("models"), list) and all(isinstance(x, str) for x in j["models"]):
+        models = list(j["models"])
+
+    models = sorted(set(models))
+    return models, (time.time() - t0)
+
 
 
 def _strip_code_fences(s: str) -> str:
@@ -119,6 +153,87 @@ def build_s_extraction_prompt(asr_text: str) -> str:
 """
 
 
+def build_soap_prompt(asr_text: str, *, style: str = "soap_v1") -> str:
+    """
+    SOAP形式の要約（推測禁止・追記禁止）。
+    style:
+      - soap_v1: 標準（推測禁止）
+      - soap_v1_short: 短め（重要点のみ）
+    """
+    style = (style or "soap_v1").strip()
+
+    common = """# 重要ルール
+- 勝手に内容を追加しない（推測禁止）
+- 喋った内容に沿って記述し、わからないことは書かない
+- 内容が不明確な箇所は「不明」としてよい（創作しない）
+"""
+
+    if style == "soap_v1_short":
+        extra = """# 出力の長さ
+- 1項目あたり最大3行程度。重要点のみ。
+"""
+    else:
+        extra = ""
+
+    return f"""以下は医者と患者の診察室での会話で主に医者の発言部分ですが、音声認識で一部同音異義語の書き違いがあります。
+これを考慮して、SOAP形式にまとめてください。
+
+{common}
+{extra}
+# 出力形式
+次の見出しで、読みやすい箇条書きでまとめてください。
+
+SOAP記録
+
+Subjective（主観）
+Objective（客観）
+Assessment（評価）
+Plan（計画）
+
+# 入力
+<<<
+{asr_text}
+>>>
+"""
+
+
+
+def ollama_generate_text(
+    cfg: OllamaConfig,
+    prompt: str,
+    *,
+    num_ctx: int = 4096,
+) -> Tuple[str, Dict[str, Any]]:
+    """Ollama /api/generate を使ってテキストを返す（format指定なし）。"""
+    url = cfg.host.rstrip("/") + "/api/generate"
+    payload = {
+        "model": cfg.model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": cfg.temperature,
+            "top_p": cfg.top_p,
+            "num_ctx": num_ctx,
+        },
+    }
+
+    t0 = time.time()
+    try:
+        with httpx.Client(timeout=cfg.timeout_sec) as client:
+            r = client.post(url, json=payload)
+            r.raise_for_status()
+            data = r.json()
+    except Exception as e:
+        raise OllamaError(f"Ollama呼び出し失敗: {e}") from e
+
+    response_text = data.get("response", "")
+    if not isinstance(response_text, str) or not response_text.strip():
+        raise OllamaError(f"Ollama responseが空です: keys={list(data.keys())}")
+
+    data["_elapsed_sec"] = round(time.time() - t0, 3)
+    return response_text.strip(), data
+
+
 def ollama_generate_json(
     cfg: OllamaConfig,
     prompt: str,
@@ -163,3 +278,72 @@ def ollama_generate_json(
     parsed = parse_ollama_json(response_text)
     data["_elapsed_sec"] = round(time.time() - t0, 3)
     return parsed, data
+
+_DEFAULT_PROMPTS = {
+    "soap_v1": {
+        "label": "SOAP(推測禁止)",
+        "template": (
+            "以下は医者と患者の診察室での会話（主に医者の発言）です。"
+            "音声認識で一部同音異義語の書き違いがあります。これを考慮してSOAP形式にまとめてください。\n"
+            "制約:\n"
+            "- 勝手に内容を追加しない\n"
+            "- 喋った内容に沿って記述\n"
+            "- わからないことは記載しない（推測しない）\n\n"
+            "会話テキスト:\n{asr_text}\n"
+        ),
+    },
+    "soap_v1_short": {
+        "label": "SOAP(短め)",
+        "template": (
+            "以下の診察会話を、推測せずSOAP形式で簡潔にまとめてください。\n\n"
+            "会話テキスト:\n{asr_text}\n"
+        ),
+    },
+}
+
+def _load_llm_json(path: str = "llm.json") -> dict:
+    if not path:  # ← None / "" 対策
+        path = "llm.json"
+    p = Path(path)
+    if not p.exists():
+        return {"prompts": _DEFAULT_PROMPTS}
+    try:
+        data = json.loads(p.read_text(encoding="utf-8"))
+        if not isinstance(data, dict):
+            raise ValueError("llm.json is not an object")
+        prompts = data.get("prompts")
+        if not isinstance(prompts, dict) or not prompts:
+            return {"prompts": _DEFAULT_PROMPTS}
+        return data
+    except Exception:
+        # 壊れてても落とさない
+        return {"prompts": _DEFAULT_PROMPTS}
+
+def list_prompt_items(path: str = "llm.json"):
+    """
+    UI用：プロンプト一覧
+    return: [{"id":"soap_v1","label":"..."} ...]
+    """
+    if not path:
+        path = "llm.json"
+    catalog = _load_llm_json(path)
+    prompts = catalog.get("prompts", _DEFAULT_PROMPTS)
+    items = []
+    for pid, p in prompts.items():
+        if not isinstance(p, dict):
+            continue
+        label = p.get("label") or pid
+        items.append({"id": pid, "label": label})
+    return items
+
+def build_prompt(prompt_id: str, asr_text: str, path: str = "llm.json") -> str:
+    if not path:
+        path = "llm.json"
+    catalog = _load_llm_json(path)
+    prompts = catalog.get("prompts", _DEFAULT_PROMPTS)
+    p = prompts.get(prompt_id) or prompts.get("soap_v1") or _DEFAULT_PROMPTS["soap_v1"]
+    template = p.get("template") or _DEFAULT_PROMPTS["soap_v1"]["template"]
+    # {asr_text} が無いテンプレでも破綻しないように
+    if "{asr_text}" in template:
+        return template.replace("{asr_text}", asr_text)
+    return template + "\n\n" + asr_text

@@ -22,5 +22,13 @@
     "enabled": true,
     "certfile": "certs/cert.pem",
     "keyfile": "certs/key.pem"
-  }
+  },
+  "ollama_host": "http://127.0.0.1:11434",
+  "ollama_model_default": "gpt-oss:20b",
+  "ollama_timeout": 120,
+  "ollama_temperature": 0.0,
+  "ollama_top_p": 0.9,
+
+  "llm_prompts_path": "./llm.json"
+
 }
