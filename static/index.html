@@ -17,12 +17,12 @@
     </div>
 
     <div class="nav-center">
-      <div class="pill"><span class="dot" id="dotWs"></span><span id="wsStatus">disconnected</span></div>
-      <div class="pill">level: <span id="level">-</span> dBFS</div>
-      <!-- <div class="pill">カルテ: <span id="patientIdNav">(未設定)</span></div> -->
       <select id="selSession" class="select" title="過去の認識結果">
         <option value="">履歴を読み込み…</option>
       </select>
+      <div class="pill"><span class="dot" id="dotWs"></span><span id="wsStatus">disconnected</span></div>
+      <div class="pill">level: <span id="level">-</span> dBFS</div>
+      <!-- <div class="pill">カルテ: <span id="patientIdNav">(未設定)</span></div> -->
     </div>
 
     <div class="nav-right">
@@ -45,11 +45,15 @@
     <!-- Left: patient + transcript -->
     <div class="card patient-card">
       <div class="hd">
-        <h3>カルテ番号</h3>
-        <div class="muted2">patient_id</div>
+        <h3>ASR情報</h3>
+        <div class="muted2">patient_id / asr_model</div>
       </div>
       <div class="bd">
-        <div id="patientId">(未設定)</div>
+        <div class="meta-row">
+          <span class="meta-item">ID: <b id="patientId">(未設定)</b></span>
+          <span class="meta-sep">/</span>
+          <span class="meta-item">ASR: <b id="asrModelName">(未設定)</b></span>
+        </div>
       </div>
 
       <div class="hd">

@@ -16,6 +16,8 @@
 
   const selAsrModel = document.getElementById("selAsrModel");
 
+  const modelEl = document.getElementById("asrModelName");
+
   async function loadAsrModels(){
     try{
       const r = await fetch("/api/asr/models");
@@ -65,6 +67,15 @@
       await loadAsrModels();
     }
   });
+
+  function setAsrModelNameFromMeta(meta){
+    // app.py は {"meta": {"asr": {...}}} を返す
+    const name =
+      meta?.asr?.model_name ||
+      meta?.asr?.model_path ||  // フォールバック（長いけど）
+      "(未設定)";
+    modelEl.textContent = name;
+  }
 
   selSession.onchange = async () => {
     if (btnStart.disabled) { // 録音中（startがdisabled）なら触らせない
@@ -142,6 +153,8 @@
       setPatient(data.patient_id);
       txEl.value = data.text || "";
       txEl.scrollTop = txEl.scrollHeight;
+      // ★追加：モデル名表示
+      setAsrModelNameFromMeta(j.meta || null);  
       log(`[session] loaded ${name}`);
     } catch (e) {
       log("[session] ERROR: " + e);

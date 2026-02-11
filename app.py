@@ -64,7 +64,28 @@ CURRENT = {
     "session_stamp": None,
     "text_path": None,
     "jsonl_path": None,
-    "full_text": ""
+    "full_text": "",
+
+    # 追加：ASR設定（UIで選んだものをここに入れる）
+    "asr": {
+        "model_name": None,     # 例: "large-v3" (models.jsonのキー)
+        "model_path": None,     # 例: "/home/yuki/.cache/.../snapshots/..."
+        "language": "ja",
+        "temperature": 0.0,
+        "prompt": "",
+        # 必要なら beam_size, vad なども追加
+    },
+
+    # 追加：辞書・編集関連
+    "dict": {
+        "version": None,
+        "rules_path": None,
+        "applied_count": 0,
+    },
+    "edits": {
+        "enabled": True,
+        "count": 0,
+    }
 }
 
 def append_jsonl(obj: dict, jsonl_path: str):
@@ -91,10 +112,41 @@ def new_session(patient_id: str):
     CURRENT["jsonl_path"] = str(js)
     CURRENT["full_text"] = ""
 
+    # セッション開始時点のASR/辞書/編集設定をスナップショット
+    session_meta = {
+        "asr": dict(CURRENT.get("asr", {})),
+        "dict": dict(CURRENT.get("dict", {})),
+        "edits": dict(CURRENT.get("edits", {})),
+    }
+
     append_jsonl(
-        {"type": "session_start", "ts": now_iso(), "patient_id": patient_id, "stamp": stamp},
+        {
+            "type": "session_start",
+            "ts": now_iso(),
+            "patient_id": patient_id,
+            "stamp": stamp,
+            "meta": session_meta,
+        },
         CURRENT["jsonl_path"]
     )
+
+def append_asr_config_event(reason: str):
+    """
+    ★ ASR設定が変わったタイミングをJSONLに残す
+    （セッションが開始済みのときだけ）
+    """
+    try:
+        if CURRENT.get("jsonl_path"):
+            append_jsonl({
+                "type": "asr_config",
+                "ts": now_iso(),
+                "patient_id": CURRENT.get("patient_id"),
+                "stamp": CURRENT.get("session_stamp"),
+                "reason": reason,
+                "asr": dict(CURRENT.get("asr", {})),
+            }, CURRENT["jsonl_path"])
+    except Exception as e:
+        log(f"[ASR] append_asr_config_event failed: {e}")
 
 # -------------------------
 # DSP / metrics
@@ -197,7 +249,7 @@ def save_wav_mono16(path: Path, audio_f32: np.ndarray, sr: int):
         wf.writeframes(pcm16.tobytes())
 
 # -------------------------
-# ASR config
+# ASR config (defaults from config.json)
 # -------------------------
 ASR_CFG = CFG.get("asr", {})
 ASR_ENABLED = bool(ASR_CFG.get("enabled", True))
@@ -208,6 +260,10 @@ ASR_COMPUTE = ASR_CFG.get("compute_type", "int8")
 ASR_BEAM = int(ASR_CFG.get("beam_size", 10))
 ASR_TEMP = float(ASR_CFG.get("temperature", 0.0))
 ASR_COPT = bool(ASR_CFG.get("condition_on_previous_text", False))
+ASR_PROMPT_DEFAULT = ASR_CFG.get(
+    "initial_prompt",
+    "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。"
+)
 
 # -------------------------
 # ASR model registry (models.json)
@@ -221,7 +277,6 @@ def load_models_registry() -> dict[str, str]:
     try:
         with open(MODELS_PATH, "r", encoding="utf-8") as f:
             d = json.load(f)
-        # 念のため文字列だけにする
         out = {}
         for k, v in (d or {}).items():
             if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
@@ -237,36 +292,91 @@ MODELS_REGISTRY = load_models_registry()
 if ASR_MODEL_ID and ASR_MODEL_ID in MODELS_REGISTRY:
     ASR_MODEL = MODELS_REGISTRY[ASR_MODEL_ID]
 
+# ★ 起動時に CURRENT.asr を defaults で初期化（ここ重要）
+CURRENT["asr"]["model_name"] = ASR_MODEL_ID
+CURRENT["asr"]["model_path"] = ASR_MODEL
+CURRENT["asr"]["language"] = ASR_LANG
+CURRENT["asr"]["temperature"] = ASR_TEMP
+CURRENT["asr"]["prompt"] = ASR_PROMPT_DEFAULT
+
+def get_asr_runtime_config() -> dict:
+    """
+    ★ ASR実行時に使う設定を CURRENT から引く（未設定ならdefaultへフォールバック）
+    """
+    a = CURRENT.get("asr") or {}
+    model_path = a.get("model_path") or ASR_MODEL
+    model_name = a.get("model_name") or ASR_MODEL_ID
+    lang = a.get("language") or ASR_LANG
+    temp = float(a.get("temperature") if a.get("temperature") is not None else ASR_TEMP)
+    prompt = a.get("prompt") if a.get("prompt") is not None else ASR_PROMPT_DEFAULT
+
+    return {
+        "model_name": model_name,
+        "model_path": model_path,
+        "language": lang,
+        "temperature": temp,
+        "prompt": prompt,
+        "beam_size": ASR_BEAM,                  # これは現状グローバルのまま
+        "condition_on_previous_text": ASR_COPT, # これも現状グローバルのまま
+        "device": ASR_DEVICE,
+        "compute_type": ASR_COMPUTE,
+    }
 
 # -------------------------
 # Whisper model cache
 # -------------------------
-_MODEL = None
+# ★ モデル切替に対応するため、path/device/compute でキャッシュ
+_MODEL_CACHE: dict[tuple[str, str, str], WhisperModel] = {}
 
-def get_model() -> WhisperModel:
-    global _MODEL
-    if _MODEL is None:
-        log(f"[ASR] loading model: {ASR_MODEL} device={ASR_DEVICE} compute={ASR_COMPUTE}")
-        _MODEL = WhisperModel(ASR_MODEL, device=ASR_DEVICE, compute_type=ASR_COMPUTE)
+def get_model_for(model_path: str) -> WhisperModel:
+    key = (model_path, ASR_DEVICE, ASR_COMPUTE)
+    m = _MODEL_CACHE.get(key)
+    if m is None:
+        log(f"[ASR] loading model: {model_path} device={ASR_DEVICE} compute={ASR_COMPUTE}")
+        m = WhisperModel(model_path, device=ASR_DEVICE, compute_type=ASR_COMPUTE)
+        _MODEL_CACHE[key] = m
         log("[ASR] model loaded")
-    return _MODEL
+    return m
+
+def clear_model_cache_for(model_path: str | None):
+    """
+    ★ 特定モデルだけ捨てる（model_pathがNoneなら全部捨てる）
+    """
+    global _MODEL_CACHE
+    if model_path is None:
+        _MODEL_CACHE = {}
+        return
+    key_prefix = (model_path, ASR_DEVICE, ASR_COMPUTE)
+    _MODEL_CACHE.pop(key_prefix, None)
 
 def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
     """
-    models.json のキーを受け取り、ASR_MODEL を差し替え、WhisperModelキャッシュを破棄する。
+    models.json のキーを受け取り、ASR_MODEL を差し替える。
+    ★ 同時に CURRENT["asr"] も更新し、jsonlにも asr_config を残す。
     """
-    global ASR_MODEL, ASR_MODEL_ID, _MODEL, MODELS_REGISTRY
+    global ASR_MODEL, ASR_MODEL_ID, MODELS_REGISTRY
 
-    MODELS_REGISTRY = load_models_registry()  # ついでにリロード（models.json編集しても反映）
+    MODELS_REGISTRY = load_models_registry()  # models.json編集しても反映
     if model_id not in MODELS_REGISTRY:
         return (False, f"unknown model_id: {model_id}")
+
+    old_path = ASR_MODEL
 
     ASR_MODEL_ID = model_id
     ASR_MODEL = MODELS_REGISTRY[model_id]
 
-    # ここが重要：モデルキャッシュ破棄（次のASRで再ロード）
-    _MODEL = None
+    # ★ CURRENTへ反映
+    CURRENT["asr"]["model_name"] = model_id
+    CURRENT["asr"]["model_path"] = ASR_MODEL
+
+    # ★ 古いモデルキャッシュを捨てる（全部捨ててもOK）
+    clear_model_cache_for(old_path)
+
     log(f"[ASR] model switched -> id={ASR_MODEL_ID} path={ASR_MODEL}")
+
+    # ★ 既にセッションがあるなら、その時点の設定変更をjsonlに残す
+    append_asr_config_event("model_switched")
+
     return (True, "ok")
 
 # -------------------------
@@ -298,7 +408,6 @@ def read_patient_id_from_dyna(path: Path) -> str | None:
     をSJIS(cp932)で読み、先頭カラム(ID)だけ返す。
     """
     try:
-        # SMBで書き込み中でも読めるように、まず1行だけバイナリで読む
         with open(path, "rb") as f:
             raw = f.readline()
 
@@ -307,7 +416,6 @@ def read_patient_id_from_dyna(path: Path) -> str | None:
             return None
 
         pid = line.split(",")[0].strip()
-        # 念のため数字以外を弾く（必要なら緩める）
         return pid if pid.isdigit() else None
 
     except Exception as e:
@@ -321,7 +429,7 @@ async def broadcast(obj: dict, *, reset_states: bool = False):
     dead: list[WebSocket] = []
     for ws, st in list(CLIENTS.items()):
         if reset_states:
-            st.reset_pending = True  # ★次の受信ループでリセットさせる
+            st.reset_pending = True
         try:
             await ws.send_json(obj)
         except Exception:
@@ -352,12 +460,10 @@ async def dyna_watch_task():
                 await asyncio.sleep(0.5)
                 continue
 
-            # SMB書き込み完了待ち
             await asyncio.sleep(0.25)
 
             pid = read_patient_id_from_dyna(latest)
 
-            # ★ ここで「最新を読んだら、そのファイル含め全部削除」
             delete_all_dyna_files(paths)
             last_batch_sig = sig
 
@@ -373,7 +479,6 @@ async def dyna_watch_task():
                         "jsonl_path": CURRENT["jsonl_path"]
                     }, reset_states=True)
 
-            # 次の作成を待つ
             await asyncio.sleep(0.5)
 
         except Exception as e:
@@ -386,7 +491,6 @@ async def dyna_watch_task():
 SESSION_TXT_RE = re.compile(r"^(?P<patient_id>[^_]+)_(?P<stamp>\d{8}_\d{6})\.txt$")
 
 def _list_session_txt_files() -> list[Path]:
-    # OUTPUTS_DIR は既に app.py 内で定義されている前提（data/sessions）
     files = sorted(OUTPUTS_DIR.glob("*.txt"))
     return files
 
@@ -395,7 +499,6 @@ def _parse_session_name(name: str):
     if not m:
         return None
     return m.group("patient_id"), m.group("stamp")
-
 
 # -------------------------
 # Web
@@ -414,19 +517,21 @@ async def _startup():
 
 @app.get("/api/asr/models")
 async def api_asr_models():
-    # 毎回リロード（models.json編集に追従）
     reg = load_models_registry()
-    current_id = ASR_MODEL_ID if ASR_MODEL_ID else None
 
-    # current_id が未設定なら、ASR_MODELの値から逆引きできるものがあればセット
-    if not current_id and reg:
+    # ★ current は “CURRENT優先” で返す（表示が一貫する）
+    cur = CURRENT.get("asr", {}).get("model_name") or ASR_MODEL_ID
+
+    if not cur and reg:
+        # CURRENTにもASR_MODEL_IDにも無い場合だけ、path逆引き
+        cur_path = CURRENT.get("asr", {}).get("model_path") or ASR_MODEL
         for k, v in reg.items():
-            if v == ASR_MODEL:
-                current_id = k
+            if v == cur_path:
+                cur = k
                 break
 
     return {
-        "current": current_id,
+        "current": cur,
         "models": [{"id": k, "label": k} for k in sorted(reg.keys())],
     }
 
@@ -437,7 +542,37 @@ async def api_asr_set_model(payload: dict = Body(...)):
     if not ok:
         return {"ok": False, "error": msg}
 
-    return {"ok": True, "current": ASR_MODEL_ID}
+    return {"ok": True, "current": CURRENT["asr"]["model_name"]}
+
+@app.post("/api/asr/config")
+async def api_asr_set_config(payload: dict = Body(...)):
+    """
+    ★ UIから prompt / temperature / language を反映する
+    payload例:
+      {"language":"ja", "temperature":0.0, "prompt":"..."}
+    """
+    a = CURRENT.setdefault("asr", {})
+    changed = False
+
+    if "language" in payload and isinstance(payload["language"], str):
+        a["language"] = payload["language"].strip() or "ja"
+        changed = True
+
+    if "temperature" in payload:
+        try:
+            a["temperature"] = float(payload["temperature"])
+            changed = True
+        except Exception:
+            pass
+
+    if "prompt" in payload and isinstance(payload["prompt"], str):
+        a["prompt"] = payload["prompt"]
+        changed = True
+
+    if changed:
+        append_asr_config_event("config_updated")
+
+    return {"ok": True, "asr": dict(a)}
 
 @app.get("/api/sessions")
 def api_sessions():
@@ -447,30 +582,25 @@ def api_sessions():
         if not info:
             continue
         patient_id, stamp = info
-        # stamp: YYYYMMDD_HHMMSS
         items.append({
-            "name": p.name,               # 例: 16231_20260209_121559.txt
-            "patient_id": patient_id,     # 例: 16231
-            "stamp": stamp,               # 例: 20260209_121559
+            "name": p.name,
+            "patient_id": patient_id,
+            "stamp": stamp,
             "label": f"{patient_id} / {stamp[:8]} {stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}",
         })
 
-    # 新しい順（stamp降順）
     items.sort(key=lambda x: x["stamp"], reverse=True)
     return {"items": items}
 
 @app.get("/api/session/{name}")
 def api_session_get(name: str):
-    # URLエンコード対策
     name = unquote(name)
 
-    # 安全のため、ファイル名だけ許可
     info = _parse_session_name(name)
     if not info:
         return JSONResponse({"error": "invalid session name"}, status_code=400)
 
     p = (OUTPUTS_DIR / name).resolve()
-    # ディレクトリ外参照ブロック
     if OUTPUTS_DIR.resolve() not in p.parents:
         return JSONResponse({"error": "invalid path"}, status_code=400)
 
@@ -479,7 +609,25 @@ def api_session_get(name: str):
 
     text = p.read_text(encoding="utf-8", errors="replace")
     patient_id, stamp = info
-    return {"name": name, "patient_id": patient_id, "stamp": stamp, "text": text}
+
+    # ★ 対応する jsonl があれば session_start/meta を読む（モデル表示に使える）
+    meta = None
+    j = (OUTPUTS_DIR / name.replace(".txt", ".jsonl")).resolve()
+    if OUTPUTS_DIR.resolve() in j.parents and j.exists():
+        try:
+            with open(j, "r", encoding="utf-8") as f:
+                for line in f:
+                    line = line.strip()
+                    if not line:
+                        continue
+                    obj = json.loads(line)
+                    if obj.get("type") == "session_start":
+                        meta = obj.get("meta")
+                        break
+        except Exception as e:
+            log(f"[SESSION] jsonl read failed: {j}: {e}")
+
+    return {"name": name, "patient_id": patient_id, "stamp": stamp, "text": text, "meta": meta}
 
 # -------------------------
 # Per-connection state
@@ -497,11 +645,9 @@ class State:
 
         self.asr_q: asyncio.Queue[dict] = asyncio.Queue(maxsize=int(CFG.get("asr_queue", 20)))
         self.asr_task: asyncio.Task | None = None
-        # ★追加：カルテ切替などで音声状態をリセットしたいときに立てるフラグ
         self.reset_pending = False
 
     def reset_audio(self):
-        # """次の患者に混ざらないよう、音声バッファ/状態をクリア"""
         self.buf = np.zeros((0,), dtype=np.float32)
         self.ring = []
         self.in_speech = False
@@ -509,7 +655,6 @@ class State:
         self.silence_run = 0
         self.utter_frames = []
 
-        # ASR待ちも捨てる（前患者のwavを回さない）
         try:
             while True:
                 _ = self.asr_q.get_nowait()
@@ -532,7 +677,6 @@ class State:
 
         audio = np.concatenate(self.utter_frames).astype(np.float32, copy=False)
 
-        # reset
         self.utter_frames = []
         self.in_speech = False
         self.voice_run = 0
@@ -562,7 +706,6 @@ class State:
             "audio_meta": audio_meta,
         }
 
-        # JSONL: saved
         ensure_unknown_session()
         append_jsonl(
             {"type": "saved", "ts": now_iso(), "patient_id": CURRENT["patient_id"], **seg},
@@ -579,13 +722,6 @@ async def asr_worker(ws: WebSocket, st: State):
         log("[ASR] disabled -> worker exit")
         return
 
-    try:
-        model = get_model()
-    except Exception as e:
-        log(f"[ASR] model load FAILED: {e}")
-        await ws.send_json({"type": "error", "where": "asr_model_load", "error": str(e)})
-        return
-
     log("[ASR] worker started")
 
     while True:
@@ -596,19 +732,29 @@ async def asr_worker(ws: WebSocket, st: State):
             dur = job.get("dur")
             audio_meta = job.get("audio_meta", {})
 
-            log(f"[ASR] dequeued seg#{seg_id} wav={wav}")
+            cfg_rt = get_asr_runtime_config()  # ★ 実行時点の設定を取得
+            model_path = cfg_rt["model_path"]
+
+            log(f"[ASR] dequeued seg#{seg_id} wav={wav} model={cfg_rt.get('model_name')}")
+
+            try:
+                model = get_model_for(model_path)  # ★ パスに応じたモデル
+            except Exception as e:
+                log(f"[ASR] model load FAILED: {e}")
+                await ws.send_json({"type": "error", "where": "asr_model_load", "error": str(e), "model_path": model_path})
+                continue
 
             t0 = time.time()
             log(f"[ASR] transcribe start seg#{seg_id:03d} dur={dur}s")
 
             segments, _info = model.transcribe(
                 wav,
-                language=ASR_LANG,
+                language=cfg_rt["language"],
                 vad_filter=False,
-                beam_size=ASR_BEAM,
-                temperature=ASR_TEMP,
-                condition_on_previous_text=ASR_COPT,
-                initial_prompt="日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。"
+                beam_size=cfg_rt["beam_size"],
+                temperature=cfg_rt["temperature"],
+                condition_on_previous_text=cfg_rt["condition_on_previous_text"],
+                initial_prompt=cfg_rt["prompt"],
             )
 
             texts = []
@@ -636,7 +782,6 @@ async def asr_worker(ws: WebSocket, st: State):
 
             quality, reasons = judge_quality(audio_meta, asr_meta, text)
 
-            # 保存（患者セッションへ）
             ensure_unknown_session()
             pid = CURRENT["patient_id"]
             txt_path = CURRENT["text_path"]
@@ -645,6 +790,7 @@ async def asr_worker(ws: WebSocket, st: State):
             if text:
                 append_text_line(txt_path, text)
 
+            # ★ jsonl に「この asr がどの設定で走ったか」を一緒に保存
             append_jsonl({
                 "type": "asr",
                 "ts": now_iso(),
@@ -653,6 +799,15 @@ async def asr_worker(ws: WebSocket, st: State):
                 "dur": dur,
                 "wav": wav,
                 "text": text,
+                "asr_cfg": {
+                    "model_name": cfg_rt.get("model_name"),
+                    "model_path": cfg_rt.get("model_path"),
+                    "language": cfg_rt.get("language"),
+                    "temperature": cfg_rt.get("temperature"),
+                    "prompt": cfg_rt.get("prompt"),
+                    "beam_size": cfg_rt.get("beam_size"),
+                    "condition_on_previous_text": cfg_rt.get("condition_on_previous_text"),
+                },
                 "meta": {"audio": audio_meta, "asr": asr_meta, "quality": quality, "reasons": reasons}
             }, jsonl_path)
 
@@ -670,6 +825,13 @@ async def asr_worker(ws: WebSocket, st: State):
                 "dur": dur,
                 "wav": wav,
                 "text": text,
+                "asr_cfg": {
+                    "model_name": cfg_rt.get("model_name"),
+                    "model_path": cfg_rt.get("model_path"),
+                    "language": cfg_rt.get("language"),
+                    "temperature": cfg_rt.get("temperature"),
+                    "prompt": cfg_rt.get("prompt"),
+                },
                 "meta": {"audio": audio_meta, "asr": asr_meta, "quality": quality, "reasons": reasons}
             })
 
@@ -687,7 +849,7 @@ async def ws_endpoint(ws: WebSocket):
     await ws.accept()
 
     st = State()
-    CLIENTS[ws] = st  # ★setではなくdictへ登録
+    CLIENTS[ws] = st
 
     log(f"[WS] open enabled_asr={ASR_ENABLED}")
     st.asr_task = asyncio.create_task(asr_worker(ws, st))
@@ -696,7 +858,6 @@ async def ws_endpoint(ws: WebSocket):
         await ws.send_json({"type": "status", "msg": "connected", "patient_id": CURRENT["patient_id"]})
 
         while True:
-            # ★追加：カルテ切替などのリセット指示が来ていたら、ここで安全にリセット
             if st.reset_pending:
                 st.reset_pending = False
                 st.reset_audio()
@@ -740,10 +901,8 @@ async def ws_endpoint(ws: WebSocket):
                         if st.silence_run >= END_SILENCE_FRAMES:
                             seg = st.finalize_segment()
                             if seg:
-                                # saved（wsへ）
                                 await ws.send_json({"type": "saved", "patient_id": CURRENT["patient_id"], **seg})
 
-                                # asr投入（詰まったら落とす）
                                 try:
                                     st.asr_q.put_nowait(seg)
                                     log(f"[ASR_Q] enqueued seg#{seg['seg_id']:03d} dur={seg['dur']}s wav={seg['wav']}")

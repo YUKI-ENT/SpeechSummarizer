@@ -322,3 +322,19 @@
       line-height: 1.5;
       white-space: pre-wrap;
     }
+
+    .meta-row{
+      display:flex;
+      align-items:baseline;
+      gap:8px;
+      flex-wrap:wrap;
+      font-size:14px; /* 小さめ */
+      line-height:1.2;
+    }
+    .meta-item b{
+      font-weight:700;
+    }
+    .meta-sep{
+      opacity:.6;
+    }
+
