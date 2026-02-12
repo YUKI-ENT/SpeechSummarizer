@@ -19,23 +19,9 @@ from faster_whisper import WhisperModel
 from urllib.parse import unquote
 import re
 
-# -------------------------
-# LLM (Ollama)
-# -------------------------
-try:
-    # package layout: modules/
-    from modules.llm_ollama import OllamaConfig, OllamaError, list_ollama_models, list_prompt_items
-    from modules.run_ollama_from_jsonl import summarize_soap_from_jsonl
-except ImportError:
-    # fallback (when running from a flat directory)
-    from modules.llm_ollama import OllamaConfig, OllamaError, list_ollama_models, list_prompt_items
-    from modules.run_ollama_from_jsonl import summarize_soap_from_jsonl
-    def list_prompt_items():
-        # 旧版フォールバック（最低限）
-        return [
-            {"id": "soap_v1", "label": "SOAP(推測禁止)"},
-            {"id": "soap_v1_short", "label": "SOAP(短め)"},
-        ]
+from typing import Any, Dict, List, Optional
+
+import httpx
 
 # -------------------------
 # Config
@@ -56,19 +42,146 @@ WAV_DIR = Path(CFG.get("wav_dir", "data/wav"))
 ensure_dir(OUTPUTS_DIR)
 ensure_dir(WAV_DIR)
 
+
+# -------------------------
+# LLM (Ollama)
+# -------------------------
+OLLAMA_HOST = (CFG.get("ollama_host") or "http://127.0.0.1:11434").strip()
+OLLAMA_MODEL_DEFAULT = (CFG.get("ollama_model_default") or "gemma3:12b").strip()
+OLLAMA_TIMEOUT = float(CFG.get("ollama_timeout") or 120.0)
+OLLAMA_TEMPERATURE = float(CFG.get("ollama_temperature") or 0.0)
+OLLAMA_TOP_P = float(CFG.get("ollama_top_p") or 0.9)
+
+LLM_PROMPTS_PATH = (CFG.get("llm_prompts_path") or "").strip() or None
+
+LLM_DIR = Path(CFG.get("llm_outputs_dir", "data/llm"))
+ensure_dir(LLM_DIR)
+
+def _safe_name(s: str) -> str:
+    s = (s or "").strip()
+    s = s.replace("/", "_").replace("\\", "_").replace(":", "_")
+    s = re.sub(r"[^0-9A-Za-z._-]+", "_", s)
+    return s[:120] if len(s) > 120 else s
+
+def _session_from_jsonl_name(path: Path) -> Dict[str, str]:
+    # <patient>_<stamp>.jsonl
+    m = re.match(r"^(?P<pid>.+)_(?P<stamp>\d{8}_\d{6})\.jsonl$", path.name)
+    if not m:
+        return {"patient_id": CURRENT.get("patient_id") or "unknown", "stamp": CURRENT.get("session_stamp") or ""}
+    return {"patient_id": m.group("pid"), "stamp": m.group("stamp")}
+
+def ollama_generate_text(*, host: str, model: str, prompt: str, timeout_sec: float, temperature: float, top_p: float) -> Dict[str, Any]:
+    url = host.rstrip("/") + "/api/generate"
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": temperature,
+            "top_p": top_p,
+        },
+    }
+    with httpx.Client(timeout=timeout_sec) as client:
+        r = client.post(url, json=payload)
+        r.raise_for_status()
+        return r.json()
+
+def list_ollama_models(host: str, *, timeout_sec: float) -> List[str]:
+    url = host.rstrip("/") + "/api/tags"
+    with httpx.Client(timeout=timeout_sec) as client:
+        r = client.get(url)
+        r.raise_for_status()
+        j = r.json()
+    out = []
+    for m in j.get("models", []) or []:
+        name = m.get("name") or m.get("model")
+        if name:
+            out.append(str(name))
+    return out
+
+def load_prompt_catalog(path: Optional[str]) -> Dict[str, Any]:
+    if not path:
+        return {"default": "soap_v1", "items": []}
+    pth = Path(path)
+    if not pth.exists():
+        return {"default": "soap_v1", "items": []}
+    try:
+        return json.loads(pth.read_text(encoding="utf-8"))
+    except Exception:
+        return {"default": "soap_v1", "items": []}
+
+def list_prompt_items(path: Optional[str]) -> Dict[str, Any]:
+    cat = load_prompt_catalog(path)
+    items = cat.get("items") or []
+    out_items = []
+    for it in items:
+        pid = (it.get("id") or "").strip()
+        if not pid:
+            continue
+        out_items.append({"id": pid, "label": (it.get("label") or pid)})
+    default_id = (cat.get("default") or (out_items[0]["id"] if out_items else "soap_v1"))
+    return {"default": default_id, "items": out_items}
+
+def build_prompt(prompt_id: str, asr_text: str, *, path: Optional[str]) -> str:
+    cat = load_prompt_catalog(path)
+    items = cat.get("items") or []
+    tpl = None
+    for it in items:
+        if (it.get("id") or "").strip() == prompt_id:
+            tpl = it.get("prompt")
+            break
+    if not tpl:
+        # fallback
+        tpl = '''以下は医者と患者の診察室での会話で主に医者の発言部分ですが、音声認識で一部同音異義語の書き違いがあります。
+これを考慮して、SOAP形式にまとめてください。勝手に内容を追加せず喋った内容に沿って記述し、わからないことは記載しないでください。
+
+=== 会話テキスト ===
+{asr_text}
+'''
+    return tpl.replace("{asr_text}", asr_text)
+
+def collect_asr_text_from_jsonl(jsonl_path: Path, *, min_quality: str = "good", max_lines: Optional[int] = None) -> str:
+    order = {"bad": 0, "maybe": 1, "good": 2}
+    def ok(q: str) -> bool:
+        return order.get(q, 1) >= order.get(min_quality, 1)
+
+    lines: List[str] = []
+    with jsonl_path.open("r", encoding="utf-8") as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except Exception:
+                continue
+            if rec.get("type") != "asr":
+                continue
+            q = str((rec.get("meta") or {}).get("quality", "unknown"))
+            if not ok(q):
+                continue
+            t = (rec.get("text") or "").strip()
+            if not t:
+                continue
+            lines.append(t)
+            if max_lines and len(lines) >= max_lines:
+                break
+    return "\n".join(lines)
+
+def save_llm_summary(*, jsonl_path: Path, model: str, prompt_id: str, summary: str) -> str:
+    info = _session_from_jsonl_name(jsonl_path)
+    pid = info.get("patient_id", "unknown")
+    stamp = info.get("stamp", "")
+    fname = f"{pid}_{stamp}__{_safe_name(model)}__{_safe_name(prompt_id)}__{now_stamp()}.txt"
+    out_path = LLM_DIR / fname
+    out_path.write_text(summary or "", encoding="utf-8")
+    return fname
+
 # dyna watcher
 DYNA_WATCH_DIR = Path(CFG.get("dyna_watch_dir", "/home/yuki/SpeechID"))
 DYNA_GLOB = CFG.get("dyna_glob", "dyna*.txt")
 DYNA_DELETE_AFTER_READ = bool(CFG.get("delete_after_read", True))
 
-#ollama
-OLLAMA_HOST = CFG.get("ollama_host", "http://127.0.0.1:11434")
-OLLAMA_MODEL_DEFAULT = CFG.get("ollama_model_default", "")
-OLLAMA_TIMEOUT = int(CFG.get("ollama_timeout", 120))
-OLLAMA_TEMPERATURE = float(CFG.get("ollama_temperature", 0.0))
-OLLAMA_TOP_P = float(CFG.get("ollama_top_p", 0.9))
-
-LLM_PROMPTS_PATH = CFG.get("llm_prompts_path") or "llm.json"
 # -------------------------
 # Logging / time
 # -------------------------
@@ -502,7 +615,8 @@ async def dyna_watch_task():
                         "type": "patient_changed",
                         "patient_id": pid,
                         "text_path": CURRENT["text_path"],
-                        "jsonl_path": CURRENT["jsonl_path"]
+                        "jsonl_path": CURRENT["jsonl_path"],
+                        "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else "")
                     }, reset_states=True)
 
             await asyncio.sleep(0.5)
@@ -530,6 +644,139 @@ def _parse_session_name(name: str):
 # Web
 # -------------------------
 app = FastAPI()
+
+
+# -------------------------
+# LLM APIs
+# -------------------------
+@app.get("/api/llm/models")
+async def api_llm_models():
+    try:
+        models = list_ollama_models(OLLAMA_HOST, timeout_sec=OLLAMA_TIMEOUT)
+        return {"ok": True, "models": models, "default_model": OLLAMA_MODEL_DEFAULT}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e), "models": [], "default_model": OLLAMA_MODEL_DEFAULT}, status_code=500)
+
+@app.get("/api/llm/prompts")
+async def api_llm_prompts():
+    items = list_prompt_items(LLM_PROMPTS_PATH)
+    return {"ok": True, "items": items.get("items", []), "default_prompt_id": items.get("default")}
+
+@app.get("/api/llm/history")
+async def api_llm_history(session: str = "", patient_id: str = ""):
+    """指定セッション（<pid>_<stamp>.txt）か patient_id でLLM要約履歴を返す。"""
+    session = (session or "").strip()
+    patient_id = (patient_id or "").strip()
+
+    pid = ""
+    stamp = ""
+    if session:
+        m = re.match(r"^(?P<pid>.+)_(?P<stamp>\d{8}_\d{6})\.txt$", session)
+        if m:
+            pid = m.group("pid")
+            stamp = m.group("stamp")
+    if not pid and patient_id:
+        pid = patient_id
+
+    items = []
+    if pid and stamp:
+        pat = f"{pid}_{stamp}__*.txt"
+        files = sorted(LLM_DIR.glob(pat), key=lambda x: x.stat().st_mtime, reverse=True)
+    elif pid:
+        pat = f"{pid}_*__*.txt"
+        files = sorted(LLM_DIR.glob(pat), key=lambda x: x.stat().st_mtime, reverse=True)
+    else:
+        files = []
+
+    for f in files[:200]:
+        # label: model/prompt/time
+        name = f.name
+        parts = name.split("__")
+        model = parts[1] if len(parts) > 1 else ""
+        prompt = parts[2] if len(parts) > 2 else ""
+        items.append({"id": name, "label": f"{model} / {prompt} / {name[-19:-4]}"})
+
+    return {"ok": True, "items": items}
+
+@app.get("/api/llm/history/{item_id}")
+async def api_llm_history_item(item_id: str):
+    item_id = unquote(item_id)
+    # no path traversal
+    if "/" in item_id or "\\" in item_id or ".." in item_id:
+        return JSONResponse({"ok": False, "error": "invalid id"}, status_code=400)
+    p = (LLM_DIR / item_id).resolve()
+    if LLM_DIR.resolve() not in p.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+    if not p.exists():
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    txt = p.read_text(encoding="utf-8")
+    return {"ok": True, "summary": txt}
+
+@app.post("/api/llm/soap")
+async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
+    """現在/過去セッションのJSONLからSOAP要約を作って返す（ついでに履歴保存）。"""
+    session_txt = (payload.get("session") or "").strip()
+    min_quality = (payload.get("min_quality") or "good").strip()
+    include_meta = bool(payload.get("include_meta", False))
+    prompt_id = (payload.get("prompt_id") or "soap_v1").strip()
+
+    model = (payload.get("model") or "").strip() or OLLAMA_MODEL_DEFAULT
+    temperature = float(payload.get("temperature") or OLLAMA_TEMPERATURE)
+    top_p = float(payload.get("top_p") or OLLAMA_TOP_P)
+
+    max_lines = payload.get("max_lines")
+    try:
+        max_lines = int(max_lines) if max_lines not in (None, "", 0, "0") else None
+    except Exception:
+        max_lines = None
+
+    # decide jsonl path
+    if session_txt:
+        if not session_txt.endswith(".txt"):
+            return JSONResponse({"ok": False, "error": "session must be .txt name"}, status_code=400)
+        jsonl_path = (OUTPUTS_DIR / session_txt.replace(".txt", ".jsonl")).resolve()
+    else:
+        if not CURRENT.get("jsonl_path"):
+            return JSONResponse({"ok": False, "error": "no current session"}, status_code=400)
+        jsonl_path = Path(CURRENT["jsonl_path"]).resolve()
+
+    if OUTPUTS_DIR.resolve() not in jsonl_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+    if not jsonl_path.exists():
+        return JSONResponse({"ok": False, "error": f"not found: {jsonl_path.name}"}, status_code=404)
+
+    asr_text = collect_asr_text_from_jsonl(jsonl_path, min_quality=min_quality, max_lines=max_lines)
+    if not asr_text.strip():
+        return JSONResponse({"ok": False, "error": "ASR text empty"}, status_code=400)
+
+    prompt = build_prompt(prompt_id, asr_text, path=LLM_PROMPTS_PATH)
+
+    import time as _time
+    t0 = _time.time()
+    try:
+        raw = ollama_generate_text(
+            host=OLLAMA_HOST,
+            model=model,
+            prompt=prompt,
+            timeout_sec=OLLAMA_TIMEOUT,
+            temperature=temperature,
+            top_p=top_p,
+        )
+        summary = (raw.get("response") or "").strip()
+        elapsed = round(_time.time() - t0, 3)
+
+        saved_id = save_llm_summary(jsonl_path=jsonl_path, model=model, prompt_id=prompt_id, summary=summary)
+        return {
+            "ok": True,
+            "summary": summary,
+            "model": model,
+            "prompt_id": prompt_id,
+            "elapsed_sec": elapsed,
+            "saved_id": saved_id,
+            "session_jsonl": jsonl_path.name,
+        }
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 @app.get("/")
@@ -654,112 +901,6 @@ def api_session_get(name: str):
             log(f"[SESSION] jsonl read failed: {j}: {e}")
 
     return {"name": name, "patient_id": patient_id, "stamp": stamp, "text": text, "meta": meta}
-
-
-
-@app.get("/api/llm/prompts")
-def api_llm_prompts():
-    """Return prompt list for UI (loaded from llm.json)."""
-    try:
-        prompts_path = (CFG or {}).get("llm_prompts_path") if "CFG" in globals() else None
-    except Exception:
-        prompts_path = None
-
-    prompts_path = prompts_path or "llm.json"
-    items = list_prompt_items(prompts_path)
-    return {"ok": True, "items": items}
-
-@app.get("/api/llm/models")
-async def api_llm_models():
-    """Ollama のモデル一覧（/api/tags）を返す。"""
-    try:
-        res = list_ollama_models(OLLAMA_HOST, timeout_sec=OLLAMA_TIMEOUT)
-
-        # 戻り値の揺れ吸収：
-        #  - [models] だけ返す版
-        #  - (models, elapsed) を返す版
-        elapsed = None
-        models = res
-        if isinstance(res, tuple):
-            models = res[0] if len(res) >= 1 else []
-            elapsed = res[1] if len(res) >= 2 else None
-
-        return {
-            "ok": True,
-            "models": models or [],
-            "default_model": OLLAMA_MODEL_DEFAULT,
-            "elapsed_sec": round(float(elapsed), 3) if elapsed is not None else None,
-        }
-
-    except Exception as e:
-        # ★ログに出す（これがあるとデバッグが一瞬）
-        print("[api] /api/llm/models ERROR:", repr(e))
-
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": str(e),
-                "models": [],
-                "default_model": OLLAMA_MODEL_DEFAULT,
-            },
-            status_code=500,
-        )
-
-
-@app.post("/api/llm/soap")
-async def api_llm_soap(payload: dict = Body(...)):
-    """現在/過去セッションのJSONLからSOAP要約を作って返す。"""
-    session_txt = (payload.get("session") or "").strip()
-    min_quality = (payload.get("min_quality") or "good").strip()
-    include_meta = bool(payload.get("include_meta", False))
-    prompt_id = (payload.get("prompt_id") or "soap_v1").strip()
-
-    # config defaults
-    host = OLLAMA_HOST 
-    model = (payload.get("model") or "").strip()
-    model = model or OLLAMA_MODEL_DEFAULT
-    timeout = OLLAMA_TIMEOUT 
-    temperature = OLLAMA_TEMPERATURE 
-    top_p = OLLAMA_TOP_P 
-
-    max_lines = payload.get("max_lines")
-    try:
-        max_lines = int(max_lines) if max_lines not in (None, "", 0, "0") else None
-    except Exception:
-        max_lines = None
-
-    # decide jsonl path
-    if session_txt:
-        if not session_txt.endswith(".txt"):
-            return JSONResponse({"ok": False, "error": "session must be .txt name"}, status_code=400)
-        jsonl_path = (OUTPUTS_DIR / session_txt.replace(".txt", ".jsonl")).resolve()
-    else:
-        if not CURRENT.get("jsonl_path"):
-            return JSONResponse({"ok": False, "error": "no current session"}, status_code=400)
-        jsonl_path = Path(CURRENT["jsonl_path"]).resolve()
-
-    if OUTPUTS_DIR.resolve() not in jsonl_path.parents:
-        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
-    if not jsonl_path.exists():
-        return JSONResponse({"ok": False, "error": f"not found: {jsonl_path.name}"}, status_code=404)
-
-    cfg = OllamaConfig(host=host, model=model, timeout_sec=timeout, temperature=temperature, top_p=top_p)
-
-    try:
-        result = summarize_soap_from_jsonl(
-            jsonl_path,
-            cfg=cfg,
-            min_quality=min_quality,
-            max_lines=max_lines,
-            include_meta=include_meta,
-            prompts_path=LLM_PROMPTS_PATH,
-            prompt_id=prompt_id,
-        )
-        return result
-    except OllamaError as e:
-        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-    except Exception as e:
-        return JSONResponse({"ok": False, "error": f"unexpected: {e}"}, status_code=500)
 
 # -------------------------
 # Per-connection state
@@ -987,7 +1128,7 @@ async def ws_endpoint(ws: WebSocket):
     st.asr_task = asyncio.create_task(asr_worker(ws, st))
 
     try:
-        await ws.send_json({"type": "status", "msg": "connected", "patient_id": CURRENT["patient_id"]})
+        await ws.send_json({"type": "status", "msg": "connected", "patient_id": CURRENT["patient_id"], "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else "")})
 
         while True:
             if st.reset_pending:

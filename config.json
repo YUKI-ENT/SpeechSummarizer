@@ -5,11 +5,11 @@
 
   "outputs_dir": "data/sessions",
   "wav_dir": "data/wav",
+  "llm_dir": "data/llm",
 
   "asr": {
     "enabled": true,
-    "model_id": "large-v3-turbo",
-    "model_path": "/home/yuki/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/snapshots/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
+    "model_id": "kotoba-v2.0",
     "language": "ja",
     "device": "cuda",
     "compute_type": "float16",

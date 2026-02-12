@@ -23,7 +23,7 @@
       /* Transcript sizing */
       --tx-size: 12px;
       --tx-line: 1.2;
-      --tx-min-h: 140px;
+      --tx-min-h: 160px;
       /* summary用（SOAP結果） */
       --sum-size: 18px;
       --sum-line: 1.4;
@@ -210,9 +210,9 @@
 
     /* Patient */
     #patientId{
-      font-size: 28px;
+      font-size: 16px;
       letter-spacing: 0.06em;
-      font-weight: 600;
+      font-weight: 300;
     }
 
     /* Transcript */
@@ -405,23 +405,39 @@
 
 
 /* --- Select Dark Theme --- */
-select.select, select.btn{
+select.select,
+select.btn{
   color: #fff;
   background: rgba(0,0,0,0.30);
   border: 1px solid rgba(255,255,255,0.14);
   border-radius: 12px;
   outline: none;
+
+  /* ⭐ ここを追加（サイズ統一） */
+  padding: 10px 12px;
+  min-height: 40px;
+  font-size: 14px;
+  line-height: 1.2;
 }
-select.select:focus, select.btn:focus{
+
+/* フォーカス */
+select.select:focus,
+select.btn:focus{
   border-color: rgba(255,255,255,0.30);
   box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
 }
-select.select option, select.btn option{
+
+/* ドロップダウン項目 */
+select.select option,
+select.btn option{
   background: #0c1022;
   color: #fff;
 }
-/* iOS/Safariなどで矢印が薄い場合のため */
-select.select, select.btn{
+
+/* Safari矢印対策 */
+select.select,
+select.btn{
   -webkit-appearance: none;
   appearance: none;
 }
+

@@ -1,322 +1,294 @@
 (() => {
-  "use strict";
+  // ===== DOM =====
+  const logEl = document.getElementById('log');
+  const levelEl = document.getElementById('level');
+  const btnStart = document.getElementById('btnStart');
+  const btnStop  = document.getElementById('btnStop');
 
-  const logEl = document.getElementById("log");
-  const levelEl = document.getElementById("level");
-  const btnStart = document.getElementById("btnStart");
-  const btnStop  = document.getElementById("btnStop");
-  const btnSoap  = document.getElementById("btnSoap");
-  const btnCopySoap = document.getElementById("btnCopySoap");
-  const selLlmModel = document.getElementById("selLlmModel");
-  const selSoapPrompt = document.getElementById("selSoapPrompt");
-  const txEl = document.getElementById("transcript");
-  const summaryEl = document.getElementById("summary");
+  const selSession = document.getElementById('selSession');
+  const selAsrModel = document.getElementById('selAsrModel');
+  const chkHearing = document.getElementById('chkHearing');
 
-  const wsStatusEl = document.getElementById("wsStatus");
-  const dotWs = document.getElementById("dotWs");
+  const patientIdEl = document.getElementById('patientId');
+  const asrModelNameEl = document.getElementById('asrModelName');
 
-  const patientIdEl = document.getElementById("patientId");
-  const selSession = document.getElementById("selSession");
+  const txEl = document.getElementById('transcript');
 
-  const chkHearing = document.getElementById("chkHearing");
+  const selLlmModel = document.getElementById('selLlmModel');
+  const selSoapPrompt = document.getElementById('selSoapPrompt');
+  const selSoapHistory = document.getElementById('selSoapHistory');
+  const btnSoap = document.getElementById('btnSoap');
+  const btnCopySoap = document.getElementById('btnCopySoap');
+  const summaryEl = document.getElementById('summary');
 
-  const selAsrModel = document.getElementById("selAsrModel");
-  const modelEl = document.getElementById("asrModelName");
+  const wsStatusEl = document.getElementById('wsStatus');
+  const dotWs = document.getElementById('dotWs');
+
+  // ===== state =====
+  let ws = null;
+  let audioCtx = null, srcNode = null, procNode = null, stream = null;
+
+  // いま「録音中のセッション」(serverが決めた .txt 名)
+  let currentSessionTxt = '';
 
   function log(s){
     if (!logEl) return;
-    logEl.textContent += s + "\n";
+    logEl.textContent += s + '\n';
     logEl.scrollTop = logEl.scrollHeight;
   }
 
   function setWsStatus(ok){
-    if (wsStatusEl) wsStatusEl.textContent = ok ? "connected" : "disconnected";
+    if (wsStatusEl) wsStatusEl.textContent = ok ? 'connected' : 'disconnected';
     if (dotWs){
-      dotWs.classList.toggle("ok", !!ok);
-      dotWs.classList.toggle("bad", !ok);
+      dotWs.classList.toggle('ok', !!ok);
+      dotWs.classList.toggle('bad', !ok);
     }
   }
 
   function setPatient(pid){
-    const v = pid || "(未設定)";
-    if (patientIdEl) patientIdEl.textContent = v;
+    if (patientIdEl) patientIdEl.textContent = pid || '(未設定)';
   }
 
   function clearTranscript(){
-    if (txEl) txEl.value = "";
+    if (txEl) txEl.value = '';
   }
 
   function clearSummary(){
-    if (!summaryEl) return;
-    summaryEl.value = "";
+    if (summaryEl) summaryEl.value = '';
   }
 
   function setAsrModelNameFromMeta(meta){
-    const name =
-      meta?.asr?.model_name ||
-      meta?.asr?.model_path ||
-      "(未設定)";
-    if (modelEl) modelEl.textContent = name;
+    // app.py は {meta:{asr:{model_name/model_path}}} を返す想定
+    const name = meta?.asr?.model_name || meta?.asr?.model_path || '(未設定)';
+    if (asrModelNameEl) asrModelNameEl.textContent = name;
   }
 
-  // ---------- ASR models ----------
+  function safeSelectValue(selectEl, value){
+    if (!selectEl) return;
+    if (!value) return;
+    const ok = [...selectEl.options].some(o => o.value === value);
+    if (ok) selectEl.value = value;
+  }
+
+  // ===== API loaders =====
   async function loadAsrModels(){
     if (!selAsrModel) return;
     try{
-      const r = await fetch("/api/asr/models");
+      const r = await fetch('/api/asr/models');
       const j = await r.json();
-
-      selAsrModel.innerHTML = "";
-      const opt0 = document.createElement("option");
-      opt0.value = "";
-      opt0.textContent = "ASR model...";
+      selAsrModel.innerHTML = '';
+      const opt0 = document.createElement('option');
+      opt0.value = '';
+      opt0.textContent = 'ASR model...';
       selAsrModel.appendChild(opt0);
-
       (j.models || []).forEach(m => {
-        const opt = document.createElement("option");
+        const opt = document.createElement('option');
         opt.value = m.id;
         opt.textContent = m.label;
         selAsrModel.appendChild(opt);
       });
-
-      if (j.current){
-        selAsrModel.value = j.current;
-      }
-      log(`[ui] ASR models loaded (current=${j.current || "n/a"})`);
+      if (j.current) selAsrModel.value = j.current;
+      log(`[ui] ASR models loaded (current=${j.current || 'n/a'})`);
     }catch(e){
       log(`[ui] loadAsrModels failed: ${e}`);
     }
   }
 
-  if (selAsrModel){
-    selAsrModel.addEventListener("change", async () => {
-      const id = (selAsrModel.value || "").trim();
-      if(!id) return;
-      try{
-        const r = await fetch("/api/asr/model", {
-          method: "POST",
-          headers: {"Content-Type":"application/json"},
-          body: JSON.stringify({id})
-        });
-        const j = await r.json();
-        if(j.ok){
-          log(`[ui] ASR model switched -> ${j.current}`);
-        }else{
-          log(`[ui] ASR model switch failed: ${j.error}`);
-          await loadAsrModels(); // 戻す
-        }
-      }catch(e){
-        log(`[ui] ASR model switch error: ${e}`);
-        await loadAsrModels();
-      }
-    });
-  }
-
-  // ---------- LLM models ----------
-  function setSelectOptions(sel, items, placeholderText){
-    sel.innerHTML = "";
-
-    const opt0 = document.createElement("option");
-    opt0.value = "";
-    opt0.textContent = placeholderText;
-    sel.appendChild(opt0);
-
-    (items || []).forEach(v => {
-      const opt = document.createElement("option");
-      opt.value = v;
-      opt.textContent = v;
-      sel.appendChild(opt);
-    });
-  }
-
-  function trySelectValue(sel, value){
-    if (!value) return false;
-    const ok = [...sel.options].some(o => o.value === value);
-    if (ok) sel.value = value;
-    return ok;
-  }
-
   async function loadLlmModels(){
     if (!selLlmModel) return;
     try{
-      const r = await fetch("/api/llm/models");
+      const r = await fetch('/api/llm/models');
       const j = await r.json();
+      if (!j || !j.ok) throw new Error(j?.error || 'LLM models unavailable');
 
-      // APIの揺れ吸収：models/items のどちらでもOKにする
-      const models = j.models || j.items || [];
-      const defaultModel = (j.default_model || j.default || j.model_default || "").trim();
-      const currentModel = (j.current || "").trim();
+      selLlmModel.innerHTML = '';
+      const opt0 = document.createElement('option');
+      opt0.value = '';
+      opt0.textContent = 'LLM model...';
+      selLlmModel.appendChild(opt0);
 
-      setSelectOptions(selLlmModel, models, "LLM model...");
+      (j.models || []).forEach(m => {
+        const opt = document.createElement('option');
+        opt.value = m;
+        opt.textContent = m;
+        selLlmModel.appendChild(opt);
+      });
 
-      // 優先順位：current → default → 先頭モデル
-      if (!trySelectValue(selLlmModel, currentModel)) {
-        if (!trySelectValue(selLlmModel, defaultModel)) {
-          if (models.length) selLlmModel.value = models[0];
-        }
-      }
-
-      log(`[ui] LLM models loaded (default=${defaultModel || "n/a"} selected=${selLlmModel.value || "n/a"})`);
+      safeSelectValue(selLlmModel, j.default_model);
     }catch(e){
       log(`[ui] loadLlmModels failed: ${e}`);
-      // 失敗しても操作不能にならないように最低限
-      if (selLlmModel && selLlmModel.options.length === 0){
-        setSelectOptions(selLlmModel, [], "LLM model...");
-      }
     }
   }
 
-  // ---------- LLM prompts ----------
   async function loadLlmPrompts(){
     if (!selSoapPrompt) return;
     try{
-      const r = await fetch("/api/llm/prompts");
+      const r = await fetch('/api/llm/prompts');
       const j = await r.json();
-      if (!j || j.ok === false) throw new Error(j?.error || "prompt list unavailable");
-
-      // API揺れ吸収：items/prompts
-      const items = j.items || j.prompts || [];
-      const defaultPrompt = (j.default_prompt || "").trim();
+      if (!j || !j.ok) throw new Error(j?.error || 'Prompt list unavailable');
 
       const cur = selSoapPrompt.value;
+      selSoapPrompt.innerHTML = '';
 
-      selSoapPrompt.innerHTML = "";
-      const opt0 = document.createElement("option");
-      opt0.value = "";
-      opt0.textContent = "Prompt...";
+      const opt0 = document.createElement('option');
+      opt0.value = '';
+      opt0.textContent = 'Prompt...';
       selSoapPrompt.appendChild(opt0);
 
-      items.forEach(it => {
-        const o = document.createElement("option");
+      (j.items || []).forEach(it => {
+        const o = document.createElement('option');
         o.value = it.id;
         o.textContent = it.label || it.id;
         selSoapPrompt.appendChild(o);
       });
 
-      // 優先順位：維持できるなら維持 → default → 先頭
-      if (!trySelectValue(selSoapPrompt, cur)) {
-        if (!trySelectValue(selSoapPrompt, defaultPrompt)) {
-          if (items.length) selSoapPrompt.value = items[0].id;
-        }
-      }
-
-      log(`[ui] LLM prompts loaded (selected=${selSoapPrompt.value || "n/a"})`);
+      // restore / default
+      safeSelectValue(selSoapPrompt, cur);
+      if (!selSoapPrompt.value) safeSelectValue(selSoapPrompt, j.default_prompt_id);
+      if (!selSoapPrompt.value && (j.items || []).length) selSoapPrompt.value = j.items[0].id;
     }catch(e){
       log(`[ui] loadLlmPrompts failed: ${e}`);
-      // fallback: 何も無いなら最低限を入れる
-      if (selSoapPrompt.options.length === 0){
-        selSoapPrompt.innerHTML = `
-          <option value="">Prompt...</option>
-          <option value="soap_v1">SOAP(推測禁止)</option>
-          <option value="soap_v1_short">SOAP(短め)</option>
-        `;
-        selSoapPrompt.value = "soap_v1";
-      }
     }
   }
 
-  // ---------- sessions ----------
-  async function refreshSessions() {
+  function getSessionForLlm(){
+    // 録音中は server が送ってくる currentSessionTxt を優先
+    if (btnStart && btnStart.disabled && currentSessionTxt) return currentSessionTxt;
+    return (selSession?.value || '').trim();
+  }
+
+  async function loadLlmHistory(){
+    if (!selSoapHistory) return;
+    const session = getSessionForLlm();
+    if (!session){
+      selSoapHistory.innerHTML = '<option value="">履歴…</option>';
+      return;
+    }
+    try{
+      const r = await fetch('/api/llm/history?session=' + encodeURIComponent(session));
+      const j = await r.json();
+      if (!j || !j.ok) throw new Error(j?.error || 'LLM history unavailable');
+
+      const cur = selSoapHistory.value;
+      selSoapHistory.innerHTML = '';
+
+      const opt0 = document.createElement('option');
+      opt0.value = '';
+      opt0.textContent = '履歴…';
+      selSoapHistory.appendChild(opt0);
+
+      (j.items || []).forEach(it => {
+        const o = document.createElement('option');
+        o.value = it.name;
+        o.textContent = it.label || it.name;
+        selSoapHistory.appendChild(o);
+      });
+
+      safeSelectValue(selSoapHistory, cur);
+    }catch(e){
+      log(`[ui] loadLlmHistory failed: ${e}`);
+    }
+  }
+
+  async function loadLlmHistoryItem(name){
+    if (!name) return;
+    try{
+      const r = await fetch('/api/llm/history/' + encodeURIComponent(name));
+      const j = await r.json();
+      if (!j || !j.ok) throw new Error(j?.error || 'LLM history item unavailable');
+      if (summaryEl){
+        summaryEl.value = j.summary || '';
+        summaryEl.scrollTop = 0;
+      }
+      log(`[llm] loaded history ${name}`);
+    }catch(e){
+      log(`[llm] load history failed: ${e}`);
+    }
+  }
+
+  async function refreshSessions(){
     if (!selSession) return;
-    try {
-      const res = await fetch("/api/sessions");
+    try{
+      const res = await fetch('/api/sessions');
       const data = await res.json();
       const items = data.items || [];
-
       const prev = selSession.value;
-
-      selSession.innerHTML =
-        `<option value="">履歴を読み込み…</option>` +
-        items.map(it => `<option value="${it.name}">${it.label}</option>`).join("");
-
+      selSession.innerHTML = '<option value="">履歴を読み込み…</option>' +
+        items.map(it => `<option value="${it.name}">${it.label}</option>`).join('');
       if (prev && items.some(it => it.name === prev)) selSession.value = prev;
-    } catch (e) {
-      log("[sessions] ERROR: " + e);
+    }catch(e){
+      log('[sessions] ERROR: ' + e);
     }
   }
 
-  async function loadSession(name) {
+  async function loadSession(name){
     if (!name) return;
-    try {
-      const res = await fetch("/api/session/" + encodeURIComponent(name));
+    try{
+      const res = await fetch('/api/session/' + encodeURIComponent(name));
       const data = await res.json();
       if (data.error) {
-        log("[session] " + data.error);
+        log('[session] ' + data.error);
         return;
       }
       setPatient(data.patient_id);
+      currentSessionTxt = name;
       if (txEl){
-        txEl.value = data.text || "";
+        txEl.value = data.text || '';
         txEl.scrollTop = txEl.scrollHeight;
       }
       clearSummary();
       setAsrModelNameFromMeta(data.meta || null);
+      await loadLlmHistory();
       log(`[session] loaded ${name}`);
-    } catch (e) {
-      log("[session] ERROR: " + e);
+    }catch(e){
+      log('[session] ERROR: ' + e);
     }
   }
 
-  if (selSession){
-    selSession.onchange = async () => {
-      if (btnStart && btnStart.disabled) return; // 録音中
-      await loadSession(selSession.value);
-    };
-  }
-
-  // ---------- hearing mode ----------
-  if (chkHearing){
-    chkHearing.onchange = () => {
-      document.body.classList.toggle("hearing", chkHearing.checked);
-    };
-  }
-
-  // ---------- SOAP ----------
+  // ===== LLM actions =====
   async function runSoapSummary(){
     if (!summaryEl || !btnSoap) return;
-
     try{
       btnSoap.disabled = true;
       if (btnCopySoap) btnCopySoap.disabled = true;
 
-      const session = (selSession?.value || "").trim();
-      const model = (selLlmModel?.value || "").trim(); // 空ならサーバ側defaultに任せる
-      const prompt_id = (selSoapPrompt?.value || "soap_v1").trim() || "soap_v1";
+      const session = getSessionForLlm();
+      if (!session){
+        log('[llm] no session selected');
+        return;
+      }
 
-      log(`[llm] SOAP start ${session ? "(" + session + ")" : "(current)"} model=${model || "(default)"} prompt=${prompt_id}`);
+      const model = (selLlmModel?.value || '').trim();
+      const prompt_id = (selSoapPrompt?.value || 'soap_v1').trim();
 
-      const r = await fetch("/api/llm/soap", {
-        method: "POST",
-        headers: {"Content-Type":"application/json"},
+      log(`[llm] SOAP start (${session}) model=${model || '(default)'} prompt=${prompt_id}`);
+
+      const r = await fetch('/api/llm/soap', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
         body: JSON.stringify({ session, model, prompt_id })
       });
-
       const j = await r.json();
+      if (!j.ok) throw new Error(j.error || String(r.status));
 
-      if (j.ok){
-        summaryEl.value = j.summary || "";
-        summaryEl.scrollTop = 0;
-        log(`[llm] SOAP done model=${j.model || model || "default"} elapsed=${j.elapsed_sec ?? "?"}s`);
-      }else{
-        log(`[llm] SOAP failed: ${j.error || r.status}`);
-      }
+      summaryEl.value = j.summary || '';
+      summaryEl.scrollTop = 0;
+      log(`[llm] SOAP done model=${j.model || '?'} elapsed=${j.elapsed_sec}s saved=${j.saved_name || 'n/a'}`);
+
+      await loadLlmHistory();
     }catch(e){
-      log(`[llm] SOAP error: ${e}`);
+      log(`[llm] SOAP failed: ${e}`);
     }finally{
       btnSoap.disabled = false;
       if (btnCopySoap) btnCopySoap.disabled = false;
     }
   }
 
-  if (btnSoap){
-    btnSoap.onclick = () => runSoapSummary();
-  }
-
   async function copySoapToClipboard(){
     if (!summaryEl) return;
-    const text = summaryEl.value || "";
+    const text = summaryEl.value || '';
     if (!text){
-      log("[ui] copy: empty");
+      log('[ui] copy: empty');
       return;
     }
     try{
@@ -325,166 +297,207 @@
       }else{
         summaryEl.focus();
         summaryEl.select();
-        document.execCommand("copy");
+        document.execCommand('copy');
         summaryEl.setSelectionRange(0,0);
       }
-      log("[ui] copied SOAP to clipboard");
+      log('[ui] copied SOAP to clipboard');
     }catch(e){
       log(`[ui] copy failed: ${e}`);
     }
   }
 
-  if (btnCopySoap){
-    btnCopySoap.onclick = () => copySoapToClipboard();
-  }
-
-  // ---------- audio/ws ----------
-  let ws = null;
-  let audioCtx = null, srcNode = null, procNode = null, stream = null;
-
+  // ===== recording =====
   const targetSampleRate = 48000;
   const chunkSamples = 2400; // 50ms @48k
   let pcmBuf = new Float32Array(0);
 
   function appendBuf(a, b){
     const out = new Float32Array(a.length + b.length);
-    out.set(a, 0); out.set(b, a.length);
+    out.set(a, 0);
+    out.set(b, a.length);
     return out;
   }
 
-  if (btnStart){
-    btnStart.onclick = async () => {
-      try {
-        if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-          log("ERROR: getUserMedia unavailable. Try HTTPS or localhost. protocol=" + location.protocol + " host=" + location.host);
-          return;
+  async function startRecording(){
+    try {
+      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
+        log('ERROR: getUserMedia unavailable. Try HTTPS or localhost. protocol=' + location.protocol + ' host=' + location.host);
+        return;
+      }
+
+      const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+      ws = new WebSocket(wsUrl);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => { log('[ws] open'); setWsStatus(true); };
+      ws.onclose = () => { log('[ws] close'); setWsStatus(false); };
+      ws.onerror = (e) => log('[ws] error ' + e);
+
+      let transcript = '';
+
+      ws.onmessage = (ev) => {
+        const msg = JSON.parse(ev.data);
+
+        if (msg.type === 'level' && levelEl) levelEl.textContent = msg.dbfs;
+
+        if (msg.type === 'status') {
+          setPatient(msg.patient_id);
+          if (msg.session_txt) currentSessionTxt = msg.session_txt;
+          log('[status] ' + msg.msg + (msg.session_txt ? ' session=' + msg.session_txt : ''));
+          loadLlmHistory();
         }
 
-        const wsUrl = (location.protocol === "https:" ? "wss://" : "ws://") + location.host + "/ws";
-        ws = new WebSocket(wsUrl);
-        ws.binaryType = "arraybuffer";
+        if (msg.type === 'patient_changed') {
+          setPatient(msg.patient_id);
+          if (msg.session_txt) currentSessionTxt = msg.session_txt;
+          transcript = '';
+          clearTranscript();
+          clearSummary();
+          log('[patient_changed] ' + (msg.patient_id || '(未設定)') + (msg.session_txt ? ' session=' + msg.session_txt : ''));
+          loadLlmHistory();
+        }
 
-        ws.onopen = () => { log("[ws] open"); setWsStatus(true); };
-        ws.onclose = () => { log("[ws] close"); setWsStatus(false); };
-        ws.onerror = (e) => log("[ws] error " + e);
+        if (msg.type === 'saved') {
+          log(`[saved] ${msg.wav} dur=${msg.dur}s`);
+        }
 
-        let transcript = "";
-
-        ws.onmessage = (ev) => {
-          const msg = JSON.parse(ev.data);
-
-          if (msg.type === "level" && levelEl) levelEl.textContent = msg.dbfs;
-
-          if (msg.type === "saved") {
-            log(`[saved] ${msg.wav} dur=${msg.dur}s`);
-          }
-
-          if (msg.type === "asr") {
-            if (msg.text) {
-              transcript += (transcript ? " " : "") + msg.text;
-              if (txEl){
-                txEl.value = transcript;
-                txEl.scrollTop = txEl.scrollHeight;
-              }
+        if (msg.type === 'asr') {
+          if (msg.text) {
+            transcript += (transcript ? ' ' : '') + msg.text;
+            if (txEl){
+              txEl.value = transcript;
+              txEl.scrollTop = txEl.scrollHeight;
             }
-            // metaが長いなら必要に応じて短縮してもOK
-            log(`[asr] seg#${msg.seg_id} ${msg.text || "(empty)"}`);
           }
+        }
 
-          if (msg.type === "status") {
-            setPatient(msg.patient_id);
-            log("[status] " + msg.msg);
-          }
+        if (msg.type === 'error') {
+          log('[error] ' + JSON.stringify(msg));
+        }
+      };
 
-          if (msg.type === "patient_changed") {
-            setPatient(msg.patient_id);
-            transcript = "";
-            clearTranscript();
-            clearSummary();
-            log("[patient_changed] " + (msg.patient_id || "(未設定)"));
-          }
+      stream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          channelCount: 1,
+          sampleRate: targetSampleRate,
+        }
+      });
 
-          if (msg.type === "error") log("[error] " + JSON.stringify(msg));
-        };
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
+      srcNode = audioCtx.createMediaStreamSource(stream);
 
-        stream = await navigator.mediaDevices.getUserMedia({
-          audio: {
-            echoCancellation: false,
-            noiseSuppression: false,
-            autoGainControl: false,
-            channelCount: 1,
-            sampleRate: targetSampleRate
-          }
+      const bufferSize = 2048;
+      procNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+      procNode.onaudioprocess = (ev) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const input = ev.inputBuffer.getChannelData(0);
+        pcmBuf = appendBuf(pcmBuf, input);
+
+        while (pcmBuf.length >= chunkSamples) {
+          const chunk = pcmBuf.slice(0, chunkSamples);
+          pcmBuf = pcmBuf.slice(chunkSamples);
+          ws.send(chunk.buffer);
+        }
+      };
+
+      srcNode.connect(procNode);
+      procNode.connect(audioCtx.destination);
+
+      if (btnStart) btnStart.disabled = true;
+      if (btnStop) btnStop.disabled = false;
+      if (selSession) selSession.disabled = true;
+      if (selAsrModel) selAsrModel.disabled = true;
+
+      clearTranscript();
+      clearSummary();
+
+      log('recording start');
+    } catch (e) {
+      log('ERROR: ' + e);
+    }
+  }
+
+  async function stopRecording(){
+    try {
+      if (procNode) procNode.disconnect();
+      if (srcNode) srcNode.disconnect();
+      if (audioCtx) await audioCtx.close();
+      if (stream) stream.getTracks().forEach(t => t.stop());
+
+      procNode = null; srcNode = null; audioCtx = null; stream = null;
+
+      if (ws) { ws.close(); ws = null; }
+
+      if (btnStart) btnStart.disabled = false;
+      if (btnStop) btnStop.disabled = true;
+      if (selSession) selSession.disabled = false;
+      if (selAsrModel) selAsrModel.disabled = false;
+
+      await refreshSessions();
+      log('recording stop');
+    } catch (e) {
+      log('ERROR: ' + e);
+    }
+  }
+
+  // ===== events =====
+  if (chkHearing){
+    chkHearing.onchange = () => document.body.classList.toggle('hearing', chkHearing.checked);
+  }
+
+  if (selAsrModel){
+    selAsrModel.addEventListener('change', async () => {
+      const id = selAsrModel.value;
+      if (!id) return;
+      try{
+        const r = await fetch('/api/asr/model', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ id })
         });
-
-        audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
-        srcNode = audioCtx.createMediaStreamSource(stream);
-
-        const bufferSize = 2048;
-        procNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
-        procNode.onaudioprocess = (ev) => {
-          if (!ws || ws.readyState !== WebSocket.OPEN) return;
-          const input = ev.inputBuffer.getChannelData(0);
-          pcmBuf = appendBuf(pcmBuf, input);
-
-          while (pcmBuf.length >= chunkSamples) {
-            const chunk = pcmBuf.slice(0, chunkSamples);
-            pcmBuf = pcmBuf.slice(chunkSamples);
-            ws.send(chunk.buffer);
-          }
-        };
-
-        srcNode.connect(procNode);
-        procNode.connect(audioCtx.destination);
-
-        btnStart.disabled = true;
-        if (btnStop) btnStop.disabled = false;
-
-        if (selSession) selSession.disabled = true;
-        if (selAsrModel) selAsrModel.disabled = true;
-
-        clearTranscript();
-        clearSummary();
-
-        log("recording start");
-      } catch (e) {
-        log("ERROR: " + e);
+        const j = await r.json();
+        if (j.ok){
+          log(`[ui] ASR model switched -> ${j.current}`);
+        }else{
+          log(`[ui] ASR model switch failed: ${j.error}`);
+          await loadAsrModels();
+        }
+      }catch(e){
+        log(`[ui] ASR model switch error: ${e}`);
+        await loadAsrModels();
       }
+    });
+  }
+
+  if (selSession){
+    selSession.onchange = async () => {
+      if (btnStart && btnStart.disabled) return; // 録音中は触らない
+      await loadSession(selSession.value);
     };
   }
 
-  if (btnStop){
-    btnStop.onclick = async () => {
-      try {
-        if (procNode) procNode.disconnect();
-        if (srcNode) srcNode.disconnect();
-        if (audioCtx) await audioCtx.close();
-        if (stream) stream.getTracks().forEach(t => t.stop());
-
-        procNode=null; srcNode=null; audioCtx=null; stream=null;
-
-        if (ws) { ws.close(); ws=null; }
-
-        if (btnStart) btnStart.disabled = false;
-        btnStop.disabled = true;
-
-        if (selSession) selSession.disabled = false;
-        if (selAsrModel) selAsrModel.disabled = false;
-
-        await refreshSessions();
-
-        log("recording stop");
-      } catch (e) {
-        log("ERROR: " + e);
-      }
+  if (selSoapHistory){
+    selSoapHistory.onchange = async () => {
+      const name = selSoapHistory.value;
+      if (!name) return;
+      await loadLlmHistoryItem(name);
     };
   }
 
-  // ---------- initial ----------
+  if (btnSoap) btnSoap.onclick = () => runSoapSummary();
+  if (btnCopySoap) btnCopySoap.onclick = () => copySoapToClipboard();
+
+  if (btnStart) btnStart.onclick = () => startRecording();
+  if (btnStop) btnStop.onclick = () => stopRecording();
+
+  // ===== init =====
   setWsStatus(false);
+  refreshSessions();
   loadAsrModels();
   loadLlmModels();
   loadLlmPrompts();
-  refreshSessions();
-
+  loadLlmHistory();
 })();
