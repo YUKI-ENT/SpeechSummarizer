@@ -157,6 +157,53 @@
       background: rgba(255,80,80,0.14);
       border-color: rgba(255,80,80,0.30);
     }
+   
+    .btn.btn-rec{
+      padding: 0 !important;      /* ← .btn の padding を潰す */
+      width: 44px;
+      height: 44px;
+      border-radius: 50%;
+      border: none;               /* borderは好み。残すならここ消す */
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      line-height: 1;
+    }
+
+    .mic-icon{
+      width: 28px;
+      height: 28px;
+      fill: currentColor;
+      display: block;
+    }
+
+    /* 停止中 */
+    .btn-rec .mic-icon{
+      width: 32px;
+      height: 32px;
+      fill: #999;
+    }
+
+    /* 録音中 */
+    .btn-rec.recording{
+      background: rgba(255,0,0,0.15);
+    }
+
+    .btn-rec.recording .mic-icon{
+      fill: #ff4b4b;
+    }
+
+    /* パルスアニメ（任意だけどおすすめ） */
+    .btn-rec.recording{
+      animation: recPulse 1.5s infinite;
+    }
+
+    @keyframes recPulse{
+      0%   { box-shadow: 0 0 0 0 rgba(255,0,0,0.6); }
+      70%  { box-shadow: 0 0 0 10px rgba(255,0,0,0); }
+      100% { box-shadow: 0 0 0 0 rgba(255,0,0,0); }
+    }
+
 
     .toggle{
       display:inline-flex;
@@ -441,3 +488,526 @@ select.btn{
   appearance: none;
 }
 
+/* ===== AI処理ヘッダ：2行固定で崩れない ===== */
+.hd.summary-block{
+  align-items: center;
+  gap: 12px;
+}
+
+/* タイトルは左固定、右は2行のグリッド */
+.summary-title{
+  margin: 0;
+  flex: 0 0 auto;
+  font-size: 13px;
+  letter-spacing: .2px;
+  color: rgba(255,255,255,0.78);
+  white-space: nowrap;
+}
+
+/* 右側：2行固定（上段・下段） */
+.summary-ctrl{
+  flex: 1 1 auto;
+  min-width: 0;
+
+  display: grid;
+  grid-template-rows: auto auto;
+  row-gap: 8px;
+}
+
+/* 各行：折り返し基本なし（狭いときだけ後述のmediaでwrap許可） */
+.ctrl-row{
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;      /* ← これで2行が崩れにくい */
+  min-width: 0;
+}
+
+/* セレクトが押し出されても壊れないように */
+.ctrl-row .select-sm{
+  min-width: 180px;       /* ここは好みで 160〜220 */
+  max-width: 34vw;        /* 右側が詰まったときの暴走防止 */
+}
+
+/* ボタンは縮みすぎない */
+.ctrl-row .btn-sm{
+  flex: 0 0 auto;
+}
+
+/* 超小画面は折り返し許可（崩れない範囲で） */
+@media (max-width: 600px){
+  .ctrl-row{
+    flex-wrap: wrap;      /* ← 狭い画面だけwrap許可 */
+    justify-content: flex-start;
+  }
+  .ctrl-row .select-sm{
+    min-width: 140px;
+    max-width: 100%;
+    flex: 1 1 220px;      /* セレクトは行内で伸縮 */
+  }
+}
+
+/* ===== Log collapse ===== */
+
+/* 初期はログ非表示にしたいなら：bodyに class="log-collapsed" を付ける運用でもOK
+   ただ、JSで初期付与するならHTMLは触らなくて良い */
+body.log-collapsed .grid{
+  grid-template-columns: 1fr; /* 右カラム消して左だけに */
+}
+
+body.log-collapsed .card.log-card{
+  display: none;
+}
+
+/* ログ表示中の見た目（任意：ボタンが押されてる感） */
+body.log-shown #btnToggleLog{
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.26);
+}
+/* =========================
+   Theme / Tokens
+   ========================= */
+:root{
+  --bg0:#070b18;
+  --bg1:#0b1633;
+
+  --txt: rgba(255,255,255,0.92);
+  --muted: rgba(255,255,255,0.62);
+  --muted2: rgba(255,255,255,0.45);
+
+  --shadow: 0 14px 40px rgba(0,0,0,0.35);
+  --radius: 18px;
+
+  /* Layout */
+  --nav-h: 64px;
+  --page-x: 22px;
+  --page-top: calc(var(--nav-h) + 16px);
+  --page-bottom: 18px;
+
+  /* Transcript / Summary sizing */
+  --tx-size: 12px;
+  --tx-line: 1.2;
+  --tx-min-h: 160px;
+
+  --sum-size: 18px;
+  --sum-line: 1.4;
+  --sum-min-h: 360px;
+}
+
+*{ box-sizing: border-box; }
+html, body{ height: 100%; }
+
+body{
+  margin:0;
+  color: var(--txt);
+  font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
+  background:
+    radial-gradient(1000px 600px at 20% 10%, rgba(120,180,255,0.18), transparent 60%),
+    radial-gradient(900px 600px at 90% 20%, rgba(180,120,255,0.16), transparent 60%),
+    linear-gradient(180deg, var(--bg1), var(--bg0));
+  padding: var(--page-top) var(--page-x) var(--page-bottom);
+  overflow-x: hidden;
+}
+
+a{ color: inherit; }
+.muted{ color: var(--muted); }
+.muted2{ color: var(--muted2); }
+
+/* =========================
+   Controls (button/select)
+   ========================= */
+.btn{
+  appearance: none;
+  border: 1px solid rgba(255,255,255,0.14);
+  background: rgba(255,255,255,0.06);
+  color: var(--txt);
+  padding: 10px 14px;
+  border-radius: 12px;
+  cursor: pointer;
+  font-weight: 600;
+  font-size: 13px;
+  transition: transform .06s ease, background .2s ease, border-color .2s ease;
+  user-select: none;
+}
+.btn:hover{ background: rgba(255,255,255,0.09); border-color: rgba(255,255,255,0.22); }
+.btn:active{ transform: translateY(1px); }
+.btn[disabled]{ opacity: .45; cursor: not-allowed; }
+
+.btn-primary{
+  background: rgba(80,170,255,0.18);
+  border-color: rgba(80,170,255,0.38);
+}
+.btn-danger{
+  background: rgba(255,80,80,0.14);
+  border-color: rgba(255,80,80,0.30);
+}
+
+.btn-sm{ padding: 8px 10px; font-size: 13px; min-height: 36px; }
+
+/* selectを“btn風”に統一 */
+select.select,
+select.btn{
+  color: #fff;
+  background: rgba(0,0,0,0.30);
+  border: 1px solid rgba(255,255,255,0.14);
+  border-radius: 12px;
+  outline: none;
+
+  padding: 10px 12px;
+  min-height: 40px;
+  font-size: 14px;
+  line-height: 1.2;
+
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
+
+  -webkit-appearance: none;
+  appearance: none;
+}
+select.select:focus,
+select.btn:focus{
+  border-color: rgba(255,255,255,0.30);
+  box-shadow: 0 0 0 3px rgba(255,255,255,0.08);
+}
+select.select option,
+select.btn option{
+  background: #0c1022;
+  color: #fff;
+}
+
+.select-sm{
+  padding: 8px 10px;
+  min-height: 36px;
+  min-width: 160px;
+  font-size: 13px;
+}
+
+/* 例外：ナビのASR selectを強調したい場合（必要なら残す） */
+#selAsrModel{
+  background: rgba(80,170,255,0.18);
+  border-color: rgba(0,0,0,.25);
+}
+
+/* Toggle */
+.toggle{
+  display:inline-flex;
+  align-items:center;
+  gap: 10px;
+  padding: 8px 10px;
+  border-radius: 12px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  font-size: 12px;
+  color: var(--muted);
+  user-select: none;
+}
+.toggle input{ width: 18px; height: 18px; }
+
+/* =========================
+   Top Navigation Bar
+   ========================= */
+.nav{
+  position: fixed;
+  top: 10px; left: 10px; right: 10px;
+  height: var(--nav-h);
+  z-index: 100;
+
+  display: grid;
+  grid-template-columns: 1fr auto 1fr;
+  align-items: center;
+  gap: 12px;
+
+  padding: 10px 12px;
+  border-radius: 16px;
+
+  background: rgba(0,0,0,0.34);
+  border: 1px solid rgba(255,255,255,0.12);
+  backdrop-filter: blur(12px);
+  box-shadow: var(--shadow);
+}
+
+.brand{
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+  padding-left: 6px;
+  min-width: 0;
+}
+.brand .title{
+  font-weight: 700;
+  letter-spacing: 0.2px;
+  font-size: 15px;
+  white-space: nowrap;
+}
+.brand .sub{
+  font-size: 12px;
+  color: var(--muted2);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 40vw;
+}
+
+.nav-center{
+  display:flex;
+  gap: 12px;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
+.nav-right{
+  display:flex;
+  gap: 10px;
+  justify-content: flex-end;
+  align-items: center;
+  padding-right: 6px;
+}
+
+.pill{
+  display:inline-flex;
+  gap: 8px;
+  align-items:center;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+/* =========================
+   Record button (mic)
+   ========================= */
+.btn.btn-rec{
+  padding: 0 !important;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: none;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  line-height: 1;
+}
+.mic-icon{
+  width: 28px;
+  height: 28px;
+  fill: currentColor;
+  display: block;
+}
+.btn-rec .mic-icon{
+  width: 32px;
+  height: 32px;
+  fill: #999;
+}
+.btn-rec.recording{
+  background: rgba(255,0,0,0.15);
+  animation: recPulse 1.5s infinite;
+}
+.btn-rec.recording .mic-icon{ fill: #ff4b4b; }
+
+@keyframes recPulse{
+  0%   { box-shadow: 0 0 0 0 rgba(255,0,0,0.6); }
+  70%  { box-shadow: 0 0 0 10px rgba(255,0,0,0); }
+  100% { box-shadow: 0 0 0 0 rgba(255,0,0,0); }
+}
+
+/* =========================
+   Layout / Cards
+   ========================= */
+.grid{
+  display: grid;
+  grid-template-columns: 1.2fr 0.8fr;
+  gap: 16px;
+  align-items: start;
+}
+
+.card{
+  background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.035));
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  overflow: hidden;
+}
+
+.card .hd{
+  padding: 12px 14px;
+  border-bottom: 1px solid rgba(255,255,255,0.08);
+  display:flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+}
+.card .hd h3{
+  margin:0;
+  font-size: 13px;
+  letter-spacing: .2px;
+  color: rgba(255,255,255,0.78);
+}
+.card .bd{ padding: 14px; }
+
+/* Meta row */
+.meta-row{
+  display:flex;
+  align-items:baseline;
+  gap:8px;
+  flex-wrap:wrap;
+  font-size:14px;
+  line-height:1.2;
+}
+.meta-item b{ font-weight:700; }
+.meta-sep{ opacity:.6; }
+
+#patientId{
+  font-size: 16px;
+  letter-spacing: 0.06em;
+  font-weight: 300;
+}
+
+/* =========================
+   Transcript / Summary / Log
+   ========================= */
+textarea.transcript{
+  width: 100%;
+  min-height: var(--tx-min-h);
+  resize: vertical;
+
+  padding: 16px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.35);
+  color: #fff;
+
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--tx-size);
+  line-height: var(--tx-line);
+  white-space: pre-wrap;
+
+  /* 画面高さに合わせて大きくなりすぎない */
+  max-height: calc(100vh - var(--page-top) - 160px);
+  overflow-y: auto;
+}
+
+textarea.summary{
+  width: 100%;
+  min-height: var(--sum-min-h);
+  resize: vertical;
+
+  padding: 12px;
+  border-radius: 16px;
+  border: 1px solid rgba(255,255,255,0.10);
+  background: rgba(0,0,0,0.25);
+  color: #fff;
+
+  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
+  font-size: var(--sum-size);
+  line-height: var(--sum-line);
+  white-space: pre-wrap;
+}
+
+#log{
+  white-space: pre-wrap;
+  height: 400px;
+  overflow: auto;
+  background: rgba(0,0,0,0.25);
+  border: 1px solid rgba(255,255,255,0.10);
+  border-radius: 16px;
+  padding: 12px;
+  font-size: 12px;
+  color: rgba(255,255,255,0.80);
+}
+
+/* =========================
+   AI処理ヘッダ：2行固定
+   ========================= */
+.hd.summary-block{
+  align-items: center;
+  gap: 12px;
+}
+.summary-title{
+  margin: 0;
+  flex: 0 0 auto;
+  white-space: nowrap;
+}
+.summary-ctrl{
+  flex: 1 1 auto;
+  min-width: 0;
+  display: grid;
+  grid-template-rows: auto auto;
+  row-gap: 8px;
+}
+.ctrl-row{
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: nowrap;
+  min-width: 0;
+}
+.ctrl-row .select-sm{
+  min-width: 180px;
+  max-width: 34vw;
+}
+.ctrl-row .btn-sm{ flex: 0 0 auto; }
+
+@media (max-width: 600px){
+  .ctrl-row{
+    flex-wrap: wrap;
+    justify-content: flex-start;
+  }
+  .ctrl-row .select-sm{
+    min-width: 140px;
+    max-width: 100%;
+    flex: 1 1 220px;
+  }
+}
+
+/* =========================
+   Log collapse
+   ========================= */
+body.log-collapsed .grid{ grid-template-columns: 1fr; }
+body.log-collapsed .card.log-card{ display: none; }
+body.log-shown #btnToggleLog{
+  background: rgba(255,255,255,0.10);
+  border-color: rgba(255,255,255,0.26);
+}
+
+/* =========================
+   Hearing Mode
+   ========================= */
+body.hearing{
+  --tx-size: 72px;
+  --tx-line: 1.85;
+}
+
+body.hearing .grid{ grid-template-columns: 1fr; }
+body.hearing .card.log-card{ display: none; }
+body.hearing .summary-block{ display: none; }
+
+body.hearing #patientId{ font-size: 40px; }
+
+body.hearing textarea.transcript{
+  height: calc(100vh - var(--page-top) - 130px);
+  max-height: none;
+  padding: 26px;
+  border: 2px solid rgba(255,255,255,0.16);
+  background: rgba(0,0,0,0.55);
+}
+
+/* =========================
+   Responsive
+   ========================= */
+@media (max-width: 980px){
+  .grid{ grid-template-columns: 1fr; }
+  #log{ height: 260px; }
+
+  .nav{ grid-template-columns: 1fr; height: auto; }
+  body{ --page-top: 110px; }
+
+  .nav-right{ justify-content: flex-start; flex-wrap: wrap; }
+  .nav-center{ justify-content: flex-start; }
+}

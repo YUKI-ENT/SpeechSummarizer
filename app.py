@@ -52,7 +52,7 @@ OLLAMA_TIMEOUT = float(CFG.get("ollama_timeout") or 120.0)
 OLLAMA_TEMPERATURE = float(CFG.get("ollama_temperature") or 0.0)
 OLLAMA_TOP_P = float(CFG.get("ollama_top_p") or 0.9)
 
-LLM_PROMPTS_PATH = (CFG.get("llm_prompts_path") or "").strip() or None
+LLM_PROMPTS_PATH = (CFG.get("llm_prompts_path") or "llm.json").strip()
 
 LLM_DIR = Path(CFG.get("llm_outputs_dir", "data/llm"))
 ensure_dir(LLM_DIR)
@@ -100,15 +100,67 @@ def list_ollama_models(host: str, *, timeout_sec: float) -> List[str]:
     return out
 
 def load_prompt_catalog(path: Optional[str]) -> Dict[str, Any]:
-    if not path:
+    """
+    llm.json を読み込み、内部表現を必ず
+      {"default": "...", "items":[{"id","label","template"}...]}
+    に正規化して返す。
+    対応:
+      - 新: {"prompts": {"id": {"label":..,"template":..}, ...}}
+      - 旧: {"items": [{"id":..,"label":..,"template":..}, ...], "default": "..."}
+    """
+    # path が None / 空なら空カタログ
+    if not path or not str(path).strip():
         return {"default": "soap_v1", "items": []}
-    pth = Path(path)
-    if not pth.exists():
+
+    p = Path(path)
+
+    # 相対パスは「実行CWD」基準になるので、
+    # もし app.py 基準にしたいならここで app.py のディレクトリと join してもOK
+    # p = (Path(__file__).resolve().parent / p).resolve()  # ←必要なら
+
+    if not p.exists():
         return {"default": "soap_v1", "items": []}
-    try:
-        return json.loads(pth.read_text(encoding="utf-8"))
-    except Exception:
-        return {"default": "soap_v1", "items": []}
+
+    data = json.loads(p.read_text(encoding="utf-8"))
+
+    # --- 旧形式: items配列 ---
+    if isinstance(data, dict) and isinstance(data.get("items"), list):
+        default_id = (data.get("default") or data.get("default_prompt_id") or "soap_v1")
+        items = []
+        for it in data["items"]:
+            if not isinstance(it, dict):
+                continue
+            pid = (it.get("id") or "").strip()
+            if not pid:
+                continue
+            items.append({
+                "id": pid,
+                "label": it.get("label") or pid,
+                "template": it.get("template") or "",
+            })
+        return {"default": default_id, "items": items}
+
+    # --- あなたの形式: prompts辞書 ---
+    if isinstance(data, dict) and isinstance(data.get("prompts"), dict):
+        default_id = (data.get("default") or data.get("default_prompt_id") or "soap_v1")
+        items = []
+        for pid, v in data["prompts"].items():
+            if not isinstance(v, dict):
+                continue
+            pid2 = (pid or "").strip()
+            if not pid2:
+                continue
+            items.append({
+                "id": pid2,
+                "label": v.get("label") or pid2,
+                "template": v.get("template") or "",
+            })
+        # 並び順を安定化（任意）
+        items.sort(key=lambda x: x["id"])
+        return {"default": default_id, "items": items}
+
+    # それ以外
+    return {"default": "soap_v1", "items": []}
 
 def list_prompt_items(path: Optional[str]) -> Dict[str, Any]:
     cat = load_prompt_catalog(path)
@@ -128,7 +180,7 @@ def build_prompt(prompt_id: str, asr_text: str, *, path: Optional[str]) -> str:
     tpl = None
     for it in items:
         if (it.get("id") or "").strip() == prompt_id:
-            tpl = it.get("prompt")
+            tpl = it.get("template")
             break
     if not tpl:
         # fallback
@@ -698,14 +750,14 @@ async def api_llm_history(session: str = "", patient_id: str = ""):
 
     return {"ok": True, "items": items}
 
-@app.get("/api/llm/history/{item_id}")
+@app.get("/api/llm/history/item/{item_id}")
 async def api_llm_history_item(item_id: str):
     item_id = unquote(item_id)
     # no path traversal
     if "/" in item_id or "\\" in item_id or ".." in item_id:
         return JSONResponse({"ok": False, "error": "invalid id"}, status_code=400)
     p = (LLM_DIR / item_id).resolve()
-    if LLM_DIR.resolve() not in p.parents:
+    if not p.resolve().is_relative_to(LLM_DIR.resolve()):
         return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
     if not p.exists():
         return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
@@ -714,6 +766,7 @@ async def api_llm_history_item(item_id: str):
 
 @app.post("/api/llm/soap")
 async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
+    # print(f"DEBUG: Received data from UI: {payload}")
     """現在/過去セッションのJSONLからSOAP要約を作って返す（ついでに履歴保存）。"""
     session_txt = (payload.get("session") or "").strip()
     min_quality = (payload.get("min_quality") or "good").strip()

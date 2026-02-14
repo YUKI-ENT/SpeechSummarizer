@@ -15,7 +15,8 @@
     "compute_type": "float16",
     "beam_size": 10,
     "temperature": 0.0,
-    "condition_on_previous_text": true
+    "condition_on_previous_text": true,
+    "initial_prompt": "日本の医療現場の会話。聞こえたとおりに書き起こす。"
   },
   "port": 8000,
   "ssl": {

@@ -21,8 +21,12 @@
   const btnCopySoap = document.getElementById('btnCopySoap');
   const summaryEl = document.getElementById('summary');
 
-  const wsStatusEl = document.getElementById('wsStatus');
+  // const wsStatusEl = document.getElementById('wsStatus');
   const dotWs = document.getElementById('dotWs');
+  
+  const btnRec = document.getElementById("btnRec");
+
+  let isRecording = false;
 
   // ===== state =====
   let ws = null;
@@ -31,19 +35,65 @@
   // いま「録音中のセッション」(serverが決めた .txt 名)
   let currentSessionTxt = '';
 
+  function renderRecState(){
+    if(!btnRec) return;
+
+    if(isRecording){
+      btnRec.classList.add("recording");
+    }else{
+      btnRec.classList.remove("recording");
+    }
+  }
+
+  async function startRecordingWrapper(){
+    await btnStart.onclick();   // 既存処理流用
+    isRecording = true;
+    renderRecState();
+  }
+
+  async function stopRecordingWrapper(){
+    await btnStop.onclick();
+    isRecording = false;
+    renderRecState();
+  }
+
   function log(s){
     if (!logEl) return;
     logEl.textContent += s + '\n';
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  function setWsStatus(ok){
-    if (wsStatusEl) wsStatusEl.textContent = ok ? 'connected' : 'disconnected';
-    if (dotWs){
-      dotWs.classList.toggle('ok', !!ok);
-      dotWs.classList.toggle('bad', !ok);
+  // function setWsStatus(ok){
+  //   if (wsStatusEl) wsStatusEl.textContent = ok ? 'connected' : 'disconnected';
+  //   if (dotWs){
+  //     dotWs.classList.toggle('ok', !!ok);
+  //     dotWs.classList.toggle('bad', !ok);
+  //   }
+  // }
+  document.addEventListener('DOMContentLoaded', () => {
+    const btn = document.getElementById('btnToggleLog');
+
+    // 既定：ログは畳む（表示したいならこの1行を消す）
+    document.body.classList.add('log-collapsed');
+
+    function setLogVisible(show) {
+      document.body.classList.toggle('log-collapsed', !show);
+      document.body.classList.toggle('log-shown', show);
+      if (btn) btn.setAttribute('aria-pressed', show ? 'true' : 'false');
     }
-  }
+
+    if (btn) {
+      btn.addEventListener('click', () => {
+        const show = document.body.classList.contains('log-collapsed'); // 今畳まれてるなら開く
+        setLogVisible(show);
+      });
+    }
+
+    // オプション：Escでログ閉じる
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') setLogVisible(false);
+    });
+  });
 
   function setPatient(pid){
     if (patientIdEl) patientIdEl.textContent = pid || '(未設定)';
@@ -161,7 +211,7 @@
     if (!selSoapHistory) return;
     const session = getSessionForLlm();
     if (!session){
-      selSoapHistory.innerHTML = '<option value="">履歴…</option>';
+      selSoapHistory.innerHTML = '<option value="">AI履歴</option>';
       return;
     }
     try{
@@ -179,8 +229,8 @@
 
       (j.items || []).forEach(it => {
         const o = document.createElement('option');
-        o.value = it.name;
-        o.textContent = it.label || it.name;
+        o.value = it.id;
+        o.textContent = it.label || it.id;
         selSoapHistory.appendChild(o);
       });
 
@@ -193,7 +243,8 @@
   async function loadLlmHistoryItem(name){
     if (!name) return;
     try{
-      const r = await fetch('/api/llm/history/' + encodeURIComponent(name));
+      // console.log("DEBUG: loadLlmHistoryItem called with:", name);
+      const r = await fetch('/api/llm/history/item/' + encodeURIComponent(name));
       const j = await r.json();
       if (!j || !j.ok) throw new Error(j?.error || 'LLM history item unavailable');
       if (summaryEl){
@@ -213,7 +264,7 @@
       const data = await res.json();
       const items = data.items || [];
       const prev = selSession.value;
-      selSession.innerHTML = '<option value="">履歴を読み込み…</option>' +
+      selSession.innerHTML = '<option value="">認識履歴</option>' +
         items.map(it => `<option value="${it.name}">${it.label}</option>`).join('');
       if (prev && items.some(it => it.name === prev)) selSession.value = prev;
     }catch(e){
@@ -329,8 +380,8 @@
       ws = new WebSocket(wsUrl);
       ws.binaryType = 'arraybuffer';
 
-      ws.onopen = () => { log('[ws] open'); setWsStatus(true); };
-      ws.onclose = () => { log('[ws] close'); setWsStatus(false); };
+      // ws.onopen = () => { log('[ws] open'); setWsStatus(true); };
+      // ws.onclose = () => { log('[ws] close'); setWsStatus(false); };
       ws.onerror = (e) => log('[ws] error ' + e);
 
       let transcript = '';
@@ -436,6 +487,9 @@
       if (selSession) selSession.disabled = false;
       if (selAsrModel) selAsrModel.disabled = false;
 
+      isRecording = false;
+      renderRecState();
+
       await refreshSessions();
       log('recording stop');
     } catch (e) {
@@ -493,8 +547,16 @@
   if (btnStart) btnStart.onclick = () => startRecording();
   if (btnStop) btnStop.onclick = () => stopRecording();
 
+  if(btnRec) btnRec.onclick = async () => {
+    if(isRecording){
+      await stopRecordingWrapper();
+    }else{
+      await startRecordingWrapper();
+    }
+  };
+
   // ===== init =====
-  setWsStatus(false);
+  // setWsStatus(false);
   refreshSessions();
   loadAsrModels();
   loadLlmModels();
