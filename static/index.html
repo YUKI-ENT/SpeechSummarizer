@@ -68,7 +68,14 @@
 
       <div class="hd">
         <h3>認識テキスト</h3>
-        <div class="muted2">transcript</div>
+        
+        <div class="summary-ctrl">
+          <div class="ctrl-row row1">
+            <button class="btn btn-sm" id="btnCorrectAsr" title="認識テキストをルールで補正">補正</button>
+            <button class="btn btn-sm" id="btnRebuild" title="JSONL原本から .txt を再生成して戻す">元に戻す</button>
+            <button class="btn btn-sm" id="btnCopyAsr" title="音声認識結果をコピー">Copy</button>
+          </div>
+        </div>
       </div>
       <div class="bd">
         <textarea id="transcript" class="transcript" spellcheck="false"></textarea>

@@ -8,6 +8,7 @@ __pycache__/
 # logs / audio / models
 *.wav
 recordings/
+data/
 models/
 *.log
 *.jsonl

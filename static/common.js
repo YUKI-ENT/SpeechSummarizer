@@ -26,6 +26,10 @@
   
   const btnRec = document.getElementById("btnRec");
 
+  const btnCorrectAsr = document.getElementById('btnCorrectAsr');
+  const btnRebuild = document.getElementById('btnRebuild');
+  const btnCopyAsr = document.getElementById('btnCopyAsr');
+
   let isRecording = false;
 
   // ===== state =====
@@ -296,6 +300,92 @@
     }
   }
 
+  async function applyAsrCorrection(){
+    if (!txEl) return;
+
+    try{
+      // 録音中にtxtを上書きすると体験がややこしいので止める（必要なら外してOK）
+      if (btnStart && btnStart.disabled){
+        log('[correct] 録音中は補正できません（停止してから）');
+        return;
+      }
+
+      const session = getSessionForLlm();
+      if (!session){
+        log('[correct] no session selected');
+        return;
+      }
+
+      if (btnCorrectAsr) btnCorrectAsr.disabled = true;
+
+      const r = await fetch('/api/correct/apply', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ session })
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || String(r.status));
+
+      if (txEl && typeof j.text === 'string'){
+        txEl.value = j.text;
+        txEl.scrollTop = txEl.scrollHeight;
+      }
+      clearSummary(); // transcriptが変わるので要約はクリア推奨
+
+      const st = j.stats || {};
+      log(`[correct] ${j.changed ? 'changed' : 'no change'} lines ${st.lines_in}->${st.lines_out} dropped=${st.dropped_lines} changed_lines=${st.changed_lines}`);
+    }catch(e){
+      log(`[correct] failed: ${e}`);
+    }finally{
+      if (btnCorrectAsr) btnCorrectAsr.disabled = false;
+    }
+  }
+
+  async function rebuildFromJsonl(){
+    const session = getSessionForLlm();
+    if (!session){
+      log('[rebuild] no session selected');
+      return;
+    }
+    try{
+      if (btnRebuild) btnRebuild.disabled = true;
+      log(`[rebuild] start session=${session}`);
+
+      const r = await fetch('/api/session/rebuild', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ session })
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || String(r.status));
+
+      if (txEl){
+        txEl.value = j.text || '';
+        txEl.scrollTop = txEl.scrollHeight;
+      }
+      log(`[rebuild] done segments=${j.stats?.segments ?? '?'} chars=${j.stats?.chars ?? '?'}`);
+    }catch(e){
+      log(`[rebuild] failed: ${e}`);
+    }finally{
+      if (btnRebuild) btnRebuild.disabled = false;
+    }
+  }
+
+  async function copyAsrToClipboard(){
+    if (!txEl) return;
+    const text = txEl.value || '';
+    if (!text){
+      log('[ui] copy: empty');
+      return;
+    }
+    try{
+      await navigator.clipboard.writeText(text);
+      log('[ui] copied SOAP to clipboard');
+    }catch(e){
+      log('[ui] copy failed: ' + e);
+    }
+  }
+
   // ===== LLM actions =====
   async function runSoapSummary(){
     if (!summaryEl || !btnSoap) return;
@@ -311,13 +401,18 @@
 
       const model = (selLlmModel?.value || '').trim();
       const prompt_id = (selSoapPrompt?.value || 'soap_v1').trim();
+      const asr_text = (txEl?.value || '').trim();
+      if (!asr_text){
+        log('[llm] transcript empty');
+        return;
+      }
 
       log(`[llm] SOAP start (${session}) model=${model || '(default)'} prompt=${prompt_id}`);
 
       const r = await fetch('/api/llm/soap', {
         method: 'POST',
         headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ session, model, prompt_id })
+        body: JSON.stringify({ session, model, prompt_id, asr_text })
       });
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || String(r.status));
@@ -457,10 +552,14 @@
       srcNode.connect(procNode);
       procNode.connect(audioCtx.destination);
 
+      //録音中Disable
       if (btnStart) btnStart.disabled = true;
       if (btnStop) btnStop.disabled = false;
       if (selSession) selSession.disabled = true;
       if (selAsrModel) selAsrModel.disabled = true;
+
+      if(btnRebuild) btnRebuild.disabled = true;
+      if(btnCorrectAsr) btnCorrectAsr.disabled = true;
 
       clearTranscript();
       clearSummary();
@@ -486,6 +585,9 @@
       if (btnStop) btnStop.disabled = true;
       if (selSession) selSession.disabled = false;
       if (selAsrModel) selAsrModel.disabled = false;
+
+      if(btnRebuild) btnRebuild.disabled = false;
+      if(btnCorrectAsr) btnCorrectAsr.disabled = false;
 
       isRecording = false;
       renderRecState();
@@ -554,6 +656,10 @@
       await startRecordingWrapper();
     }
   };
+
+  if (btnCorrectAsr) btnCorrectAsr.onclick = () => applyAsrCorrection();
+  if (btnRebuild) btnRebuild.onclick = () => rebuildFromJsonl();
+  if (btnCopyAsr) btnCopyAsr.onclick = () => copyAsrToClipboard();
 
   // ===== init =====
   // setWsStatus(false);

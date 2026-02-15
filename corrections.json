@@ -1,0 +1,16 @@
+{
+  "version": "2026-02-15",
+  "blacklist_words": ["えー", "あのー", "えっと","ご視聴ありがとうございました"],
+  "drop_regex": [
+    "^(はい|ええ|うん|んー)$"
+  ],
+  "min_chars_per_line": 2,
+  "replacements": {
+    "席": "咳",
+    "花": "鼻"
+  },
+  "regex_replacements": [
+    { "pattern": "\\s+", "repl": " " },
+    { "pattern": "、\\s*", "repl": "、" }
+  ]
+}

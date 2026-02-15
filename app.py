@@ -8,6 +8,9 @@ import json
 import datetime
 import asyncio
 from pathlib import Path
+from urllib.parse import unquote
+import re
+from typing import Any, Dict, List, Optional
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
@@ -15,22 +18,67 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 import uvicorn
 from faster_whisper import WhisperModel
-
-from urllib.parse import unquote
-import re
-
-from typing import Any, Dict, List, Optional
-
 import httpx
+import hashlib
+
+"""
+=========================
+この版での修正点（重要）
+=========================
+[1] llm.json を廃止し、config.json の llm.prompts をそのまま使う
+    - items変換/正規化/旧形式互換などは全部削除
+    - /api/llm/prompts は config の prompts を列挙するだけ
+
+[2] models.json を廃止し、config.json の asr.models をそのまま使う
+    - load_models_registry() は config から読む
+    - model_id は config の asr.model_id のまま（default_model は作らない）
+
+[3] 既存の ASR→jsonl、LLM→jsonl good以上抽出の流れは維持
+    - LLM問い合わせは jsonl から min_quality 以上のみ送信（現状通り）
+"""
 
 # -------------------------
 # Config
 # -------------------------
 CONFIG_PATH = Path("config.json")
+_CONFIG_CACHE: Optional[dict] = None
 
-def load_config() -> dict:
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        return json.load(f)
+def load_config(force_reload: bool = False) -> dict:
+    global _CONFIG_CACHE
+
+    if _CONFIG_CACHE is not None and not force_reload:
+        return _CONFIG_CACHE
+
+    if not CONFIG_PATH.exists():
+        raise FileNotFoundError(f"config.json not found: {CONFIG_PATH}")
+
+    with CONFIG_PATH.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
+
+    # 必須キー検証
+    if "asr" not in cfg:
+        raise ValueError("config.json missing 'asr' section")
+    if "llm" not in cfg:
+        raise ValueError("config.json missing 'llm' section")
+
+    # llm.prompts 必須（空でもよいが、dictであること）
+    llm = cfg.get("llm") or {}
+    prompts = llm.get("prompts")
+    if prompts is None:
+        raise ValueError("config.json missing 'llm.prompts'")
+    if not isinstance(prompts, dict):
+        raise ValueError("config.json 'llm.prompts' must be an object/dict")
+
+    # asr.models 必須（空はダメ：モデルが選べない）
+    asr = cfg.get("asr") or {}
+    models = asr.get("models")
+    if models is None:
+        raise ValueError("config.json missing 'asr.models'")
+    if not isinstance(models, dict):
+        raise ValueError("config.json 'asr.models' must be an object/dict")
+
+    _CONFIG_CACHE = cfg
+    return cfg
 
 CFG = load_config()
 
@@ -42,17 +90,264 @@ WAV_DIR = Path(CFG.get("wav_dir", "data/wav"))
 ensure_dir(OUTPUTS_DIR)
 ensure_dir(WAV_DIR)
 
+CORRECTION_RULES_PATH = Path(CFG.get("correction_rules_path", "corrections.json"))
+CORRECTIONS_DIR = Path(CFG.get("corrections_dir", "data/corrections"))
+ensure_dir(CORRECTIONS_DIR)
+_CORRECTION_CACHE: Optional[dict] = None
+
+def load_correction_rules(force_reload: bool = False) -> dict:
+    global _CORRECTION_CACHE
+    if _CORRECTION_CACHE is not None and not force_reload:
+        return _CORRECTION_CACHE
+
+    if not CORRECTION_RULES_PATH.exists():
+        # ルールが無いなら「何もしない」扱いにする
+        _CORRECTION_CACHE = {"version": None}
+        return _CORRECTION_CACHE
+
+    with CORRECTION_RULES_PATH.open("r", encoding="utf-8") as f:
+        rules = json.load(f)
+
+    if not isinstance(rules, dict):
+        raise ValueError("corrections.json must be an object")
+
+    _CORRECTION_CACHE = rules
+    return rules
+
+def _sha1_text(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()
+
+def apply_corrections(text: str, rules: dict) -> tuple[str, dict]:
+    """
+    行単位で補正:
+      - replacements（単純置換）
+      - regex_replacements（正規表現置換）
+      - blacklist_words（単語除去）
+      - drop_regex / min_chars_per_line（行の破棄）
+    """
+    if not text:
+        return text, {"changed": False, "lines_in": 0, "lines_out": 0}
+
+    repl = rules.get("replacements") or {}
+    if not isinstance(repl, dict):
+        repl = {}
+
+    regex_repls = rules.get("regex_replacements") or []
+    if not isinstance(regex_repls, list):
+        regex_repls = []
+
+    blacklist = rules.get("blacklist_words") or []
+    if not isinstance(blacklist, list):
+        blacklist = []
+
+    drop_regex = rules.get("drop_regex") or []
+    if not isinstance(drop_regex, list):
+        drop_regex = []
+
+    min_chars = rules.get("min_chars_per_line")
+    try:
+        min_chars = int(min_chars) if min_chars is not None else 0
+    except Exception:
+        min_chars = 0
+
+    # 事前コンパイル
+    compiled_drop = []
+    for pat in drop_regex:
+        try:
+            compiled_drop.append(re.compile(pat))
+        except Exception:
+            pass
+
+    compiled_regex_repls = []
+    for it in regex_repls:
+        if not isinstance(it, dict):
+            continue
+        pat = it.get("pattern")
+        rep = it.get("repl", "")
+        if not isinstance(pat, str):
+            continue
+        try:
+            compiled_regex_repls.append((re.compile(pat), str(rep)))
+        except Exception:
+            pass
+
+    lines = text.splitlines()
+    out_lines: list[str] = []
+
+    changed_count = 0
+    dropped_count = 0
+
+    for line in lines:
+        s = line.strip()
+        if not s:
+            continue
+
+        before = s
+
+        # 単純置換
+        for a, b in repl.items():
+            if not isinstance(a, str) or not isinstance(b, str) or not a:
+                continue
+            s = s.replace(a, b)
+
+        # 正規表現置換
+        for cre, rep in compiled_regex_repls:
+            s = cre.sub(rep, s)
+
+        # blacklist除去（部分一致で消す簡易版）
+        for w in blacklist:
+            if isinstance(w, str) and w:
+                s = s.replace(w, "")
+
+        s = s.strip()
+        if not s:
+            dropped_count += 1
+            continue
+
+        if min_chars > 0 and len(s) < min_chars:
+            dropped_count += 1
+            continue
+
+        drop_hit = False
+        for cre in compiled_drop:
+            if cre.match(s):
+                drop_hit = True
+                break
+        if drop_hit:
+            dropped_count += 1
+            continue
+
+        if s != before:
+            changed_count += 1
+
+        out_lines.append(s)
+
+    out_text = "\n".join(out_lines).strip() + ("\n" if out_lines else "")
+    stats = {
+        "changed": (out_text != (text.strip() + ("\n" if text.strip() else ""))),
+        "lines_in": len(lines),
+        "lines_out": len(out_lines),
+        "changed_lines": changed_count,
+        "dropped_lines": dropped_count,
+        "rules_version": rules.get("version"),
+    }
+    return out_text, stats
+
+def append_jsonl_line(jsonl_path: Path, obj: dict):
+    s = json.dumps(obj, ensure_ascii=False)
+    with jsonl_path.open("a", encoding="utf-8") as f:
+        f.write(s + "\n")
+
 
 # -------------------------
-# LLM (Ollama)
+# Logging / time
 # -------------------------
-OLLAMA_HOST = (CFG.get("ollama_host") or "http://127.0.0.1:11434").strip()
-OLLAMA_MODEL_DEFAULT = (CFG.get("ollama_model_default") or "gemma3:12b").strip()
-OLLAMA_TIMEOUT = float(CFG.get("ollama_timeout") or 120.0)
-OLLAMA_TEMPERATURE = float(CFG.get("ollama_temperature") or 0.0)
-OLLAMA_TOP_P = float(CFG.get("ollama_top_p") or 0.9)
+def log(msg: str):
+    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    print(f"[{ts}] {msg}", flush=True)
 
-LLM_PROMPTS_PATH = (CFG.get("llm_prompts_path") or "llm.json").strip()
+def now_iso() -> str:
+    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+
+def now_stamp() -> str:
+    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+
+# -------------------------
+# Session manager (single global session)
+# -------------------------
+CURRENT = {
+    "patient_id": None,
+    "session_stamp": None,
+    "text_path": None,
+    "jsonl_path": None,
+    "full_text": "",
+
+    "asr": {
+        "model_name": None,
+        "model_path": None,
+        "language": "ja",
+        "temperature": 0.0,
+        "prompt": "",
+    },
+
+    "dict": {
+        "version": None,
+        "rules_path": None,
+        "applied_count": 0,
+    },
+    "edits": {
+        "enabled": True,
+        "count": 0,
+    }
+}
+
+def append_jsonl(obj: dict, jsonl_path: str):
+    line = json.dumps(obj, ensure_ascii=False)
+    with open(jsonl_path, "a", encoding="utf-8") as f:
+        f.write(line + "\n")
+
+def append_text_line(text_path: str, s: str):
+    with open(text_path, "a", encoding="utf-8") as f:
+        f.write(s + "\n")
+
+def ensure_unknown_session():
+    if CURRENT["patient_id"] is None:
+        new_session("unknown")
+
+def new_session(patient_id: str):
+    stamp = now_stamp()
+    txt = OUTPUTS_DIR / f"{patient_id}_{stamp}.txt"
+    js  = OUTPUTS_DIR / f"{patient_id}_{stamp}.jsonl"
+    CURRENT["patient_id"] = patient_id
+    CURRENT["session_stamp"] = stamp
+    CURRENT["text_path"] = str(txt)
+    CURRENT["jsonl_path"] = str(js)
+    CURRENT["full_text"] = ""
+
+    session_meta = {
+        "asr": dict(CURRENT.get("asr", {})),
+        "dict": dict(CURRENT.get("dict", {})),
+        "edits": dict(CURRENT.get("edits", {})),
+    }
+
+    append_jsonl(
+        {
+            "type": "session_start",
+            "ts": now_iso(),
+            "patient_id": patient_id,
+            "stamp": stamp,
+            "meta": session_meta,
+        },
+        CURRENT["jsonl_path"]
+    )
+
+def append_asr_config_event(reason: str):
+    try:
+        if CURRENT.get("jsonl_path"):
+            append_jsonl({
+                "type": "asr_config",
+                "ts": now_iso(),
+                "patient_id": CURRENT.get("patient_id"),
+                "stamp": CURRENT.get("session_stamp"),
+                "reason": reason,
+                "asr": dict(CURRENT.get("asr", {})),
+            }, CURRENT["jsonl_path"])
+    except Exception as e:
+        log(f"[ASR] append_asr_config_event failed: {e}")
+
+# -------------------------
+# LLM (Ollama) - config.json の llm から読む（llm.json廃止）
+# -------------------------
+LLM_CFG = CFG.get("llm", {}) or {}
+
+OLLAMA_HOST = (LLM_CFG.get("host") or "http://127.0.0.1:11434").strip()
+OLLAMA_MODEL_DEFAULT = (LLM_CFG.get("model_default") or "gemma3:12b").strip()
+OLLAMA_TIMEOUT = float(LLM_CFG.get("timeout") or 120.0)
+OLLAMA_TEMPERATURE = float(LLM_CFG.get("temperature") or 0.0)
+OLLAMA_TOP_P = float(LLM_CFG.get("top_p") or 0.9)
+
+LLM_PROMPTS: Dict[str, Dict[str, Any]] = LLM_CFG.get("prompts", {})  # ★ dictのまま
+LLM_DEFAULT_PROMPT_ID = (LLM_CFG.get("default_prompt_id") or "soap_v1").strip()
 
 LLM_DIR = Path(CFG.get("llm_outputs_dir", "data/llm"))
 ensure_dir(LLM_DIR)
@@ -64,7 +359,6 @@ def _safe_name(s: str) -> str:
     return s[:120] if len(s) > 120 else s
 
 def _session_from_jsonl_name(path: Path) -> Dict[str, str]:
-    # <patient>_<stamp>.jsonl
     m = re.match(r"^(?P<pid>.+)_(?P<stamp>\d{8}_\d{6})\.jsonl$", path.name)
     if not m:
         return {"patient_id": CURRENT.get("patient_id") or "unknown", "stamp": CURRENT.get("session_stamp") or ""}
@@ -99,98 +393,45 @@ def list_ollama_models(host: str, *, timeout_sec: float) -> List[str]:
             out.append(str(name))
     return out
 
-def load_prompt_catalog(path: Optional[str]) -> Dict[str, Any]:
+def list_prompt_items_from_cfg() -> Dict[str, Any]:
     """
-    llm.json を読み込み、内部表現を必ず
-      {"default": "...", "items":[{"id","label","template"}...]}
-    に正規化して返す。
-    対応:
-      - 新: {"prompts": {"id": {"label":..,"template":..}, ...}}
-      - 旧: {"items": [{"id":..,"label":..,"template":..}, ...], "default": "..."}
+    ★ items変換なし。configの prompts(dict) をそのまま列挙する。
     """
-    # path が None / 空なら空カタログ
-    if not path or not str(path).strip():
-        return {"default": "soap_v1", "items": []}
-
-    p = Path(path)
-
-    # 相対パスは「実行CWD」基準になるので、
-    # もし app.py 基準にしたいならここで app.py のディレクトリと join してもOK
-    # p = (Path(__file__).resolve().parent / p).resolve()  # ←必要なら
-
-    if not p.exists():
-        return {"default": "soap_v1", "items": []}
-
-    data = json.loads(p.read_text(encoding="utf-8"))
-
-    # --- 旧形式: items配列 ---
-    if isinstance(data, dict) and isinstance(data.get("items"), list):
-        default_id = (data.get("default") or data.get("default_prompt_id") or "soap_v1")
-        items = []
-        for it in data["items"]:
-            if not isinstance(it, dict):
-                continue
-            pid = (it.get("id") or "").strip()
-            if not pid:
-                continue
-            items.append({
-                "id": pid,
-                "label": it.get("label") or pid,
-                "template": it.get("template") or "",
-            })
-        return {"default": default_id, "items": items}
-
-    # --- あなたの形式: prompts辞書 ---
-    if isinstance(data, dict) and isinstance(data.get("prompts"), dict):
-        default_id = (data.get("default") or data.get("default_prompt_id") or "soap_v1")
-        items = []
-        for pid, v in data["prompts"].items():
-            if not isinstance(v, dict):
-                continue
-            pid2 = (pid or "").strip()
-            if not pid2:
-                continue
-            items.append({
-                "id": pid2,
-                "label": v.get("label") or pid2,
-                "template": v.get("template") or "",
-            })
-        # 並び順を安定化（任意）
-        items.sort(key=lambda x: x["id"])
-        return {"default": default_id, "items": items}
-
-    # それ以外
-    return {"default": "soap_v1", "items": []}
-
-def list_prompt_items(path: Optional[str]) -> Dict[str, Any]:
-    cat = load_prompt_catalog(path)
-    items = cat.get("items") or []
-    out_items = []
-    for it in items:
-        pid = (it.get("id") or "").strip()
-        if not pid:
+    items = []
+    for pid, v in (LLM_PROMPTS or {}).items():
+        if not isinstance(pid, str) or not pid.strip():
             continue
-        out_items.append({"id": pid, "label": (it.get("label") or pid)})
-    default_id = (cat.get("default") or (out_items[0]["id"] if out_items else "soap_v1"))
-    return {"default": default_id, "items": out_items}
+        label = pid
+        if isinstance(v, dict):
+            label = (v.get("label") or pid)
+        items.append({"id": pid, "label": label})
+    items.sort(key=lambda x: x["id"])
 
-def build_prompt(prompt_id: str, asr_text: str, *, path: Optional[str]) -> str:
-    cat = load_prompt_catalog(path)
-    items = cat.get("items") or []
+    default_id = LLM_DEFAULT_PROMPT_ID
+    if default_id not in (LLM_PROMPTS or {}):
+        # defaultが存在しないときは先頭or soap_v1
+        default_id = items[0]["id"] if items else "soap_v1"
+
+    return {"default": default_id, "items": items}
+
+def build_prompt_from_cfg(prompt_id: str, asr_text: str) -> str:
+    """
+    ★ configの llm.prompts からテンプレを取得し、{asr_text} を埋める。
+    """
     tpl = None
-    for it in items:
-        if (it.get("id") or "").strip() == prompt_id:
-            tpl = it.get("template")
-            break
+    if isinstance(LLM_PROMPTS, dict):
+        v = LLM_PROMPTS.get(prompt_id)
+        if isinstance(v, dict):
+            tpl = v.get("template")
+
     if not tpl:
-        # fallback
         tpl = '''以下は医者と患者の診察室での会話で主に医者の発言部分ですが、音声認識で一部同音異義語の書き違いがあります。
 これを考慮して、SOAP形式にまとめてください。勝手に内容を追加せず喋った内容に沿って記述し、わからないことは記載しないでください。
 
 === 会話テキスト ===
 {asr_text}
 '''
-    return tpl.replace("{asr_text}", asr_text)
+    return str(tpl).replace("{asr_text}", asr_text)
 
 def collect_asr_text_from_jsonl(jsonl_path: Path, *, min_quality: str = "good", max_lines: Optional[int] = None) -> str:
     order = {"bad": 0, "maybe": 1, "good": 2}
@@ -209,12 +450,16 @@ def collect_asr_text_from_jsonl(jsonl_path: Path, *, min_quality: str = "good", 
                 continue
             if rec.get("type") != "asr":
                 continue
-            q = str((rec.get("meta") or {}).get("quality", "unknown"))
+
+            meta = rec.get("meta") or {}
+            q = str(meta.get("quality", "unknown"))
             if not ok(q):
                 continue
+
             t = (rec.get("text") or "").strip()
             if not t:
                 continue
+
             lines.append(t)
             if max_lines and len(lines) >= max_lines:
                 break
@@ -229,115 +474,79 @@ def save_llm_summary(*, jsonl_path: Path, model: str, prompt_id: str, summary: s
     out_path.write_text(summary or "", encoding="utf-8")
     return fname
 
-# dyna watcher
-DYNA_WATCH_DIR = Path(CFG.get("dyna_watch_dir", "/home/yuki/SpeechID"))
-DYNA_GLOB = CFG.get("dyna_glob", "dyna*.txt")
-DYNA_DELETE_AFTER_READ = bool(CFG.get("delete_after_read", True))
-
 # -------------------------
-# Logging / time
+# ASR config (defaults from config.json)
 # -------------------------
-def log(msg: str):
-    ts = datetime.datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    print(f"[{ts}] {msg}", flush=True)
+ASR_CFG = CFG.get("asr", {}) or {}
+ASR_ENABLED = bool(ASR_CFG.get("enabled", True))
 
-def now_iso() -> str:
-    return datetime.datetime.now().astimezone().isoformat(timespec="seconds")
+ASR_LANG = ASR_CFG.get("language", "ja")
+ASR_DEVICE = ASR_CFG.get("device", "cpu")
+ASR_COMPUTE = ASR_CFG.get("compute_type", "int8")
+ASR_BEAM = int(ASR_CFG.get("beam_size", 10))
+ASR_TEMP = float(ASR_CFG.get("temperature", 0.0))
+ASR_COPT = bool(ASR_CFG.get("condition_on_previous_text", False))
+ASR_PROMPT_DEFAULT = ASR_CFG.get(
+    "initial_prompt",
+    "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。"
+)
 
-def now_stamp() -> str:
-    return datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+# ★ model_id と models は config.json のみ
+ASR_MODEL_ID = (ASR_CFG.get("model_id") or "").strip()
 
-# -------------------------
-# Session manager (single global session)
-# -------------------------
-CURRENT = {
-    "patient_id": None,
-    "session_stamp": None,
-    "text_path": None,
-    "jsonl_path": None,
-    "full_text": "",
-
-    # 追加：ASR設定（UIで選んだものをここに入れる）
-    "asr": {
-        "model_name": None,     # 例: "large-v3" (models.jsonのキー)
-        "model_path": None,     # 例: "/home/yuki/.cache/.../snapshots/..."
-        "language": "ja",
-        "temperature": 0.0,
-        "prompt": "",
-        # 必要なら beam_size, vad なども追加
-    },
-
-    # 追加：辞書・編集関連
-    "dict": {
-        "version": None,
-        "rules_path": None,
-        "applied_count": 0,
-    },
-    "edits": {
-        "enabled": True,
-        "count": 0,
-    }
-}
-
-def append_jsonl(obj: dict, jsonl_path: str):
-    line = json.dumps(obj, ensure_ascii=False)
-    with open(jsonl_path, "a", encoding="utf-8") as f:
-        f.write(line + "\n")
-
-def append_text_line(text_path: str, s: str):
-    with open(text_path, "a", encoding="utf-8") as f:
-        f.write(s + "\n")
-
-def ensure_unknown_session():
-    """患者IDが来る前に録音を開始した場合の保険"""
-    if CURRENT["patient_id"] is None:
-        new_session("unknown")
-
-def new_session(patient_id: str):
-    stamp = now_stamp()
-    txt = OUTPUTS_DIR / f"{patient_id}_{stamp}.txt"
-    js  = OUTPUTS_DIR / f"{patient_id}_{stamp}.jsonl"
-    CURRENT["patient_id"] = patient_id
-    CURRENT["session_stamp"] = stamp
-    CURRENT["text_path"] = str(txt)
-    CURRENT["jsonl_path"] = str(js)
-    CURRENT["full_text"] = ""
-
-    # セッション開始時点のASR/辞書/編集設定をスナップショット
-    session_meta = {
-        "asr": dict(CURRENT.get("asr", {})),
-        "dict": dict(CURRENT.get("dict", {})),
-        "edits": dict(CURRENT.get("edits", {})),
-    }
-
-    append_jsonl(
-        {
-            "type": "session_start",
-            "ts": now_iso(),
-            "patient_id": patient_id,
-            "stamp": stamp,
-            "meta": session_meta,
-        },
-        CURRENT["jsonl_path"]
-    )
-
-def append_asr_config_event(reason: str):
+def load_models_registry() -> dict[str, str]:
     """
-    ★ ASR設定が変わったタイミングをJSONLに残す
-    （セッションが開始済みのときだけ）
+    ★ config.json の asr.models をそのまま読む（models.json廃止）
     """
-    try:
-        if CURRENT.get("jsonl_path"):
-            append_jsonl({
-                "type": "asr_config",
-                "ts": now_iso(),
-                "patient_id": CURRENT.get("patient_id"),
-                "stamp": CURRENT.get("session_stamp"),
-                "reason": reason,
-                "asr": dict(CURRENT.get("asr", {})),
-            }, CURRENT["jsonl_path"])
-    except Exception as e:
-        log(f"[ASR] append_asr_config_event failed: {e}")
+    cfg = load_config(force_reload=False)
+    asr = cfg.get("asr", {}) or {}
+    d = asr.get("models", {})
+    out: dict[str, str] = {}
+    if isinstance(d, dict):
+        for k, v in d.items():
+            if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
+                out[k.strip()] = v.strip()
+    return out
+
+MODELS_REGISTRY = load_models_registry()
+
+def resolve_model_path(model_id: str) -> str:
+    """
+    model_id から model_path を引く。なければ model_id 自体を返す（許容）。
+    """
+    if model_id and model_id in MODELS_REGISTRY:
+        return MODELS_REGISTRY[model_id]
+    return model_id or ""
+
+# 起動時のデフォルトモデル
+ASR_MODEL = resolve_model_path(ASR_MODEL_ID) or (ASR_CFG.get("model_path") or "small")
+
+# ★ 起動時に CURRENT.asr を defaults で初期化
+CURRENT["asr"]["model_name"] = ASR_MODEL_ID if ASR_MODEL_ID else None
+CURRENT["asr"]["model_path"] = ASR_MODEL
+CURRENT["asr"]["language"] = ASR_LANG
+CURRENT["asr"]["temperature"] = ASR_TEMP
+CURRENT["asr"]["prompt"] = ASR_PROMPT_DEFAULT
+
+def get_asr_runtime_config() -> dict:
+    a = CURRENT.get("asr") or {}
+    model_path = a.get("model_path") or ASR_MODEL
+    model_name = a.get("model_name") or ASR_MODEL_ID
+    lang = a.get("language") or ASR_LANG
+    temp = float(a.get("temperature") if a.get("temperature") is not None else ASR_TEMP)
+    prompt = a.get("prompt") if a.get("prompt") is not None else ASR_PROMPT_DEFAULT
+
+    return {
+        "model_name": model_name,
+        "model_path": model_path,
+        "language": lang,
+        "temperature": temp,
+        "prompt": prompt,
+        "beam_size": ASR_BEAM,
+        "condition_on_previous_text": ASR_COPT,
+        "device": ASR_DEVICE,
+        "compute_type": ASR_COMPUTE,
+    }
 
 # -------------------------
 # DSP / metrics
@@ -406,7 +615,6 @@ def judge_quality(audio_meta: dict, asr_meta: dict, text: str) -> tuple[str, lis
     if comp is not None and comp > 2.4:
         reasons.append("high_compression_ratio")
 
-    # 同一文字の連続（うううう…）を検知
     if text and len(text) >= 40:
         run = 1
         best = 1
@@ -440,83 +648,8 @@ def save_wav_mono16(path: Path, audio_f32: np.ndarray, sr: int):
         wf.writeframes(pcm16.tobytes())
 
 # -------------------------
-# ASR config (defaults from config.json)
-# -------------------------
-ASR_CFG = CFG.get("asr", {})
-ASR_ENABLED = bool(ASR_CFG.get("enabled", True))
-ASR_MODEL = ASR_CFG.get("model_path", "small")  # path推奨
-ASR_LANG = ASR_CFG.get("language", "ja")
-ASR_DEVICE = ASR_CFG.get("device", "cpu")
-ASR_COMPUTE = ASR_CFG.get("compute_type", "int8")
-ASR_BEAM = int(ASR_CFG.get("beam_size", 10))
-ASR_TEMP = float(ASR_CFG.get("temperature", 0.0))
-ASR_COPT = bool(ASR_CFG.get("condition_on_previous_text", False))
-ASR_PROMPT_DEFAULT = ASR_CFG.get(
-    "initial_prompt",
-    "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。"
-)
-
-# -------------------------
-# ASR model registry (models.json)
-# -------------------------
-MODELS_PATH = Path("models.json")
-ASR_MODEL_ID = ASR_CFG.get("model_id")  # config.json側にあれば使う（なくてもOK）
-
-def load_models_registry() -> dict[str, str]:
-    if not MODELS_PATH.exists():
-        return {}
-    try:
-        with open(MODELS_PATH, "r", encoding="utf-8") as f:
-            d = json.load(f)
-        out = {}
-        for k, v in (d or {}).items():
-            if isinstance(k, str) and isinstance(v, str) and k.strip() and v.strip():
-                out[k.strip()] = v.strip()
-        return out
-    except Exception as e:
-        log(f"[ASR] models.json load failed: {e}")
-        return {}
-
-MODELS_REGISTRY = load_models_registry()
-
-# 起動時に model_id が指定されていて、models.jsonにあるなら優先
-if ASR_MODEL_ID and ASR_MODEL_ID in MODELS_REGISTRY:
-    ASR_MODEL = MODELS_REGISTRY[ASR_MODEL_ID]
-
-# ★ 起動時に CURRENT.asr を defaults で初期化（ここ重要）
-CURRENT["asr"]["model_name"] = ASR_MODEL_ID
-CURRENT["asr"]["model_path"] = ASR_MODEL
-CURRENT["asr"]["language"] = ASR_LANG
-CURRENT["asr"]["temperature"] = ASR_TEMP
-CURRENT["asr"]["prompt"] = ASR_PROMPT_DEFAULT
-
-def get_asr_runtime_config() -> dict:
-    """
-    ★ ASR実行時に使う設定を CURRENT から引く（未設定ならdefaultへフォールバック）
-    """
-    a = CURRENT.get("asr") or {}
-    model_path = a.get("model_path") or ASR_MODEL
-    model_name = a.get("model_name") or ASR_MODEL_ID
-    lang = a.get("language") or ASR_LANG
-    temp = float(a.get("temperature") if a.get("temperature") is not None else ASR_TEMP)
-    prompt = a.get("prompt") if a.get("prompt") is not None else ASR_PROMPT_DEFAULT
-
-    return {
-        "model_name": model_name,
-        "model_path": model_path,
-        "language": lang,
-        "temperature": temp,
-        "prompt": prompt,
-        "beam_size": ASR_BEAM,                  # これは現状グローバルのまま
-        "condition_on_previous_text": ASR_COPT, # これも現状グローバルのまま
-        "device": ASR_DEVICE,
-        "compute_type": ASR_COMPUTE,
-    }
-
-# -------------------------
 # Whisper model cache
 # -------------------------
-# ★ モデル切替に対応するため、path/device/compute でキャッシュ
 _MODEL_CACHE: dict[tuple[str, str, str], WhisperModel] = {}
 
 def get_model_for(model_path: str) -> WhisperModel:
@@ -530,24 +663,20 @@ def get_model_for(model_path: str) -> WhisperModel:
     return m
 
 def clear_model_cache_for(model_path: str | None):
-    """
-    ★ 特定モデルだけ捨てる（model_pathがNoneなら全部捨てる）
-    """
     global _MODEL_CACHE
     if model_path is None:
         _MODEL_CACHE = {}
         return
-    key_prefix = (model_path, ASR_DEVICE, ASR_COMPUTE)
-    _MODEL_CACHE.pop(key_prefix, None)
+    key = (model_path, ASR_DEVICE, ASR_COMPUTE)
+    _MODEL_CACHE.pop(key, None)
 
 def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
     """
-    models.json のキーを受け取り、ASR_MODEL を差し替える。
-    ★ 同時に CURRENT["asr"] も更新し、jsonlにも asr_config を残す。
+    ★ config.json の asr.models のキーを受け取り、モデルを切り替える
     """
-    global ASR_MODEL, ASR_MODEL_ID, MODELS_REGISTRY
+    global MODELS_REGISTRY, ASR_MODEL_ID, ASR_MODEL
 
-    MODELS_REGISTRY = load_models_registry()  # models.json編集しても反映
+    MODELS_REGISTRY = load_models_registry()
     if model_id not in MODELS_REGISTRY:
         return (False, f"unknown model_id: {model_id}")
 
@@ -556,23 +685,22 @@ def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
     ASR_MODEL_ID = model_id
     ASR_MODEL = MODELS_REGISTRY[model_id]
 
-    # ★ CURRENTへ反映
     CURRENT["asr"]["model_name"] = model_id
     CURRENT["asr"]["model_path"] = ASR_MODEL
 
-    # ★ 古いモデルキャッシュを捨てる（全部捨ててもOK）
     clear_model_cache_for(old_path)
 
     log(f"[ASR] model switched -> id={ASR_MODEL_ID} path={ASR_MODEL}")
-
-    # ★ 既にセッションがあるなら、その時点の設定変更をjsonlに残す
     append_asr_config_event("model_switched")
-
     return (True, "ok")
 
 # -------------------------
 # dyna watcher
 # -------------------------
+DYNA_WATCH_DIR = Path(CFG.get("dyna_watch_dir", "/home/yuki/SpeechID"))
+DYNA_GLOB = CFG.get("dyna_glob", "dyna*.txt")
+DYNA_DELETE_AFTER_READ = bool(CFG.get("delete_after_read", True))
+
 def list_dyna_files() -> list[Path]:
     if not DYNA_WATCH_DIR.exists():
         return []
@@ -594,10 +722,6 @@ def delete_all_dyna_files(paths: list[Path]):
             log(f"[DYNA] delete failed {p}: {e}")
 
 def read_patient_id_from_dyna(path: Path) -> str | None:
-    """
-    dyna???????.txt の1行目:  ID,漢字氏名,ﾌﾘｶﾞﾅ,...
-    をSJIS(cp932)で読み、先頭カラム(ID)だけ返す。
-    """
     try:
         with open(path, "rb") as f:
             raw = f.readline()
@@ -631,7 +755,7 @@ async def broadcast(obj: dict, *, reset_states: bool = False):
 
 async def dyna_watch_task():
     log(f"[DYNA] watcher started dir={DYNA_WATCH_DIR} glob={DYNA_GLOB}")
-    last_batch_sig = None  # (latest_path, latest_mtime, count)
+    last_batch_sig = None
 
     while True:
         try:
@@ -683,8 +807,7 @@ async def dyna_watch_task():
 SESSION_TXT_RE = re.compile(r"^(?P<patient_id>[^_]+)_(?P<stamp>\d{8}_\d{6})\.txt$")
 
 def _list_session_txt_files() -> list[Path]:
-    files = sorted(OUTPUTS_DIR.glob("*.txt"))
-    return files
+    return sorted(OUTPUTS_DIR.glob("*.txt"))
 
 def _parse_session_name(name: str):
     m = SESSION_TXT_RE.match(name)
@@ -696,7 +819,16 @@ def _parse_session_name(name: str):
 # Web
 # -------------------------
 app = FastAPI()
+app.mount("/static", StaticFiles(directory="static"), name="static")
 
+@app.get("/")
+async def index():
+    return FileResponse("static/index.html")
+
+@app.on_event("startup")
+async def _startup():
+    asyncio.create_task(dyna_watch_task())
+    log("[APP] startup complete")
 
 # -------------------------
 # LLM APIs
@@ -711,12 +843,11 @@ async def api_llm_models():
 
 @app.get("/api/llm/prompts")
 async def api_llm_prompts():
-    items = list_prompt_items(LLM_PROMPTS_PATH)
+    items = list_prompt_items_from_cfg()
     return {"ok": True, "items": items.get("items", []), "default_prompt_id": items.get("default")}
 
 @app.get("/api/llm/history")
 async def api_llm_history(session: str = "", patient_id: str = ""):
-    """指定セッション（<pid>_<stamp>.txt）か patient_id でLLM要約履歴を返す。"""
     session = (session or "").strip()
     patient_id = (patient_id or "").strip()
 
@@ -730,7 +861,6 @@ async def api_llm_history(session: str = "", patient_id: str = ""):
     if not pid and patient_id:
         pid = patient_id
 
-    items = []
     if pid and stamp:
         pat = f"{pid}_{stamp}__*.txt"
         files = sorted(LLM_DIR.glob(pat), key=lambda x: x.stat().st_mtime, reverse=True)
@@ -740,8 +870,8 @@ async def api_llm_history(session: str = "", patient_id: str = ""):
     else:
         files = []
 
+    items = []
     for f in files[:200]:
-        # label: model/prompt/time
         name = f.name
         parts = name.split("__")
         model = parts[1] if len(parts) > 1 else ""
@@ -753,25 +883,26 @@ async def api_llm_history(session: str = "", patient_id: str = ""):
 @app.get("/api/llm/history/item/{item_id}")
 async def api_llm_history_item(item_id: str):
     item_id = unquote(item_id)
-    # no path traversal
     if "/" in item_id or "\\" in item_id or ".." in item_id:
         return JSONResponse({"ok": False, "error": "invalid id"}, status_code=400)
+
     p = (LLM_DIR / item_id).resolve()
-    if not p.resolve().is_relative_to(LLM_DIR.resolve()):
-        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
-    if not p.exists():
+    # Python>=3.9
+    if not p.is_file():
         return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
-    txt = p.read_text(encoding="utf-8")
+    if LLM_DIR.resolve() not in p.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+
+    txt = p.read_text(encoding="utf-8", errors="replace")
     return {"ok": True, "summary": txt}
 
 @app.post("/api/llm/soap")
 async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
-    # print(f"DEBUG: Received data from UI: {payload}")
-    """現在/過去セッションのJSONLからSOAP要約を作って返す（ついでに履歴保存）。"""
+    MAX_ASR_TEXT_CHARS = 50000
+
     session_txt = (payload.get("session") or "").strip()
     min_quality = (payload.get("min_quality") or "good").strip()
-    include_meta = bool(payload.get("include_meta", False))
-    prompt_id = (payload.get("prompt_id") or "soap_v1").strip()
+    prompt_id = (payload.get("prompt_id") or LLM_DEFAULT_PROMPT_ID or "soap_v1").strip()
 
     model = (payload.get("model") or "").strip() or OLLAMA_MODEL_DEFAULT
     temperature = float(payload.get("temperature") or OLLAMA_TEMPERATURE)
@@ -798,14 +929,22 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
     if not jsonl_path.exists():
         return JSONResponse({"ok": False, "error": f"not found: {jsonl_path.name}"}, status_code=404)
 
-    asr_text = collect_asr_text_from_jsonl(jsonl_path, min_quality=min_quality, max_lines=max_lines)
+    # payload優先：クライアントで手修正した transcript を使えるようにする
+    asr_text_payload = payload.get("asr_text")
+    if len(asr_text_payload) > MAX_ASR_TEXT_CHARS:
+        return JSONResponse({"ok": False, "error": "ASR text too large"}, status_code=413)
+
+    if isinstance(asr_text_payload, str) and asr_text_payload.strip():
+        asr_text = asr_text_payload.strip()
+    else:
+        asr_text = collect_asr_text_from_jsonl(jsonl_path, min_quality=min_quality, max_lines=max_lines)
+
     if not asr_text.strip():
         return JSONResponse({"ok": False, "error": "ASR text empty"}, status_code=400)
 
-    prompt = build_prompt(prompt_id, asr_text, path=LLM_PROMPTS_PATH)
+    prompt = build_prompt_from_cfg(prompt_id, asr_text)
 
-    import time as _time
-    t0 = _time.time()
+    t0 = time.time()
     try:
         raw = ollama_generate_text(
             host=OLLAMA_HOST,
@@ -816,7 +955,7 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
             top_p=top_p,
         )
         summary = (raw.get("response") or "").strip()
-        elapsed = round(_time.time() - t0, 3)
+        elapsed = round(time.time() - t0, 3)
 
         saved_id = save_llm_summary(jsonl_path=jsonl_path, model=model, prompt_id=prompt_id, summary=summary)
         return {
@@ -830,26 +969,16 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
         }
     except Exception as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
-app.mount("/static", StaticFiles(directory="static"), name="static")
 
-@app.get("/")
-async def index():
-    return FileResponse("static/index.html")
-
-@app.on_event("startup")
-async def _startup():
-    asyncio.create_task(dyna_watch_task())
-    log("[APP] startup complete")
-
+# -------------------------
+# ASR APIs
+# -------------------------
 @app.get("/api/asr/models")
 async def api_asr_models():
     reg = load_models_registry()
-
-    # ★ current は “CURRENT優先” で返す（表示が一貫する）
     cur = CURRENT.get("asr", {}).get("model_name") or ASR_MODEL_ID
 
     if not cur and reg:
-        # CURRENTにもASR_MODEL_IDにも無い場合だけ、path逆引き
         cur_path = CURRENT.get("asr", {}).get("model_path") or ASR_MODEL
         for k, v in reg.items():
             if v == cur_path:
@@ -867,16 +996,10 @@ async def api_asr_set_model(payload: dict = Body(...)):
     ok, msg = set_asr_model_by_id(model_id)
     if not ok:
         return {"ok": False, "error": msg}
-
     return {"ok": True, "current": CURRENT["asr"]["model_name"]}
 
 @app.post("/api/asr/config")
 async def api_asr_set_config(payload: dict = Body(...)):
-    """
-    ★ UIから prompt / temperature / language を反映する
-    payload例:
-      {"language":"ja", "temperature":0.0, "prompt":"..."}
-    """
     a = CURRENT.setdefault("asr", {})
     changed = False
 
@@ -900,6 +1023,9 @@ async def api_asr_set_config(payload: dict = Body(...)):
 
     return {"ok": True, "asr": dict(a)}
 
+# -------------------------
+# Session APIs
+# -------------------------
 @app.get("/api/sessions")
 def api_sessions():
     items = []
@@ -936,7 +1062,6 @@ def api_session_get(name: str):
     text = p.read_text(encoding="utf-8", errors="replace")
     patient_id, stamp = info
 
-    # ★ 対応する jsonl があれば session_start/meta を読む（モデル表示に使える）
     meta = None
     j = (OUTPUTS_DIR / name.replace(".txt", ".jsonl")).resolve()
     if OUTPUTS_DIR.resolve() in j.parents and j.exists():
@@ -955,6 +1080,187 @@ def api_session_get(name: str):
 
     return {"name": name, "patient_id": patient_id, "stamp": stamp, "text": text, "meta": meta}
 
+@app.post("/api/correct/apply")
+async def api_correct_apply(payload: Dict[str, Any] = Body(...)):
+    """
+    方針C:
+      - JSONL(ASR原本)は変更しない
+      - 表示用 .txt を補正後で置換
+      - 補正履歴(type=correction)だけ同じJSONLに追記
+    payload:
+      {"session":"<pid>_<stamp>.txt"}  # 省略時は現在セッション
+    """
+    session_txt = (payload.get("session") or "").strip()
+
+    # 対象txt / jsonl を決定
+    if session_txt:
+        info = _parse_session_name(session_txt)
+        if not info:
+            return JSONResponse({"ok": False, "error": "invalid session name"}, status_code=400)
+        txt_path = (OUTPUTS_DIR / session_txt).resolve()
+        jsonl_path = (OUTPUTS_DIR / session_txt.replace(".txt", ".jsonl")).resolve()
+    else:
+        if not CURRENT.get("text_path") or not CURRENT.get("jsonl_path"):
+            return JSONResponse({"ok": False, "error": "no current session"}, status_code=400)
+        txt_path = Path(CURRENT["text_path"]).resolve()
+        jsonl_path = Path(CURRENT["jsonl_path"]).resolve()
+        session_txt = txt_path.name
+
+    # path traversal 防止
+    if OUTPUTS_DIR.resolve() not in txt_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+    if OUTPUTS_DIR.resolve() not in jsonl_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+
+    if not txt_path.exists():
+        return JSONResponse({"ok": False, "error": "txt not found"}, status_code=404)
+    if not jsonl_path.exists():
+        return JSONResponse({"ok": False, "error": "jsonl not found"}, status_code=404)
+
+    rules = load_correction_rules()
+    before_text = txt_path.read_text(encoding="utf-8", errors="replace")
+
+    after_text, stats = apply_corrections(before_text, rules)
+
+    # 変更が無ければそのまま返す
+    if not stats.get("changed"):
+        return {"ok": True, "changed": False, "text": before_text, "stats": stats}
+
+    # 念のためバックアップ
+    ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+    bak_name = f"{session_txt}.{ts}.bak"
+    bak_path = (CORRECTIONS_DIR / bak_name).resolve()
+    bak_path.write_text(before_text, encoding="utf-8")
+
+    # .txt を置換（表示はこちらが参照される）
+    txt_path.write_text(after_text, encoding="utf-8")
+
+    # JSONLへ補正履歴だけ追記（ASR原本レコードは維持）
+    ev = {
+        "type": "correction",
+        "ts": datetime.datetime.now().isoformat(),
+        "session_txt": session_txt,
+        "rules_version": rules.get("version"),
+        "before_sha1": _sha1_text(before_text),
+        "after_sha1": _sha1_text(after_text),
+        "stats": stats,
+        "backup_txt": bak_name,
+    }
+    append_jsonl_line(jsonl_path, ev)
+
+    # 複数クライアントが見ている時に同期したいならブロードキャスト
+    try:
+        await broadcast({"type": "corrected", "session_txt": session_txt, "text": after_text, "stats": stats})
+    except Exception:
+        pass
+
+    return {"ok": True, "changed": True, "text": after_text, "stats": stats, "backup": bak_name}
+
+@app.post("/api/session/rebuild")
+async def api_session_rebuild(payload: Dict[str, Any] = Body(...)):
+    """
+    JSONL原本(type=asr)から .txt を作り直して上書きする（原本に戻す）
+    payload:
+      {"session":"<pid>_<stamp>.txt"}  # 省略時は現在セッション
+    """
+    session_txt = (payload.get("session") or "").strip()
+
+    # 対象txt / jsonl を決定（applyと同じ流儀）
+    if session_txt:
+        info = _parse_session_name(session_txt)
+        if not info:
+            return JSONResponse({"ok": False, "error": "invalid session name"}, status_code=400)
+        txt_path = (OUTPUTS_DIR / session_txt).resolve()
+        jsonl_path = (OUTPUTS_DIR / session_txt.replace(".txt", ".jsonl")).resolve()
+    else:
+        if not CURRENT.get("text_path") or not CURRENT.get("jsonl_path"):
+            return JSONResponse({"ok": False, "error": "no current session"}, status_code=400)
+        txt_path = Path(CURRENT["text_path"]).resolve()
+        jsonl_path = Path(CURRENT["jsonl_path"]).resolve()
+        session_txt = txt_path.name
+
+    # path traversal 防止（applyと同じ）
+    if OUTPUTS_DIR.resolve() not in txt_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+    if OUTPUTS_DIR.resolve() not in jsonl_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+
+    if not jsonl_path.exists():
+        return JSONResponse({"ok": False, "error": "jsonl not found"}, status_code=404)
+
+    # JSONLから type=asr の text を復元
+    parts = []
+    try:
+        with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("type") == "asr":
+                    t = rec.get("text")
+                    if isinstance(t, str):
+                        t = t.strip()
+                        if t:
+                            parts.append(t)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"read jsonl failed: {e}"}, status_code=500)
+
+    rebuilt = "\n".join(parts).strip()
+    if rebuilt:
+        rebuilt += "\n"
+
+    # 念のため現txtをバックアップ（applyと同じ流儀）
+    backup_name = None
+    try:
+        if txt_path.exists():
+            before_text = txt_path.read_text(encoding="utf-8", errors="replace")
+            ts = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+            backup_name = f"{session_txt}.{ts}.rebuild.bak"
+            bak_path = (CORRECTIONS_DIR / backup_name).resolve()
+            bak_path.write_text(before_text, encoding="utf-8")
+    except Exception:
+        # バックアップ失敗は致命ではないので続行（必要ならreturnに変えてもOK）
+        backup_name = None
+
+    # .txt を上書き
+    try:
+        txt_path.parent.mkdir(parents=True, exist_ok=True)
+        txt_path.write_text(rebuilt, encoding="utf-8")
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"write txt failed: {e}"}, status_code=500)
+
+    # JSONLへ履歴追記（原本は不変）
+    try:
+        ev = {
+            "type": "rebuild",
+            "ts": datetime.datetime.now().isoformat(),
+            "session_txt": session_txt,
+            "source": "jsonl_asr",
+            "backup_txt": backup_name,
+            "rebuilt_chars": len(rebuilt),
+            "rebuilt_segments": len(parts),
+        }
+        append_jsonl_line(jsonl_path, ev)
+    except Exception:
+        pass
+
+    # クライアント同期（任意）
+    try:
+        await broadcast({"type": "rebuilt", "session_txt": session_txt, "text": rebuilt})
+    except Exception:
+        pass
+
+    return {
+        "ok": True,
+        "text": rebuilt,
+        "stats": {"segments": len(parts), "chars": len(rebuilt)},
+        "backup": backup_name,
+    }
+    
 # -------------------------
 # Per-connection state
 # -------------------------
@@ -1058,13 +1364,13 @@ async def asr_worker(ws: WebSocket, st: State):
             dur = job.get("dur")
             audio_meta = job.get("audio_meta", {})
 
-            cfg_rt = get_asr_runtime_config()  # ★ 実行時点の設定を取得
+            cfg_rt = get_asr_runtime_config()
             model_path = cfg_rt["model_path"]
 
             log(f"[ASR] dequeued seg#{seg_id} wav={wav} model={cfg_rt.get('model_name')}")
 
             try:
-                model = get_model_for(model_path)  # ★ パスに応じたモデル
+                model = get_model_for(model_path)
             except Exception as e:
                 log(f"[ASR] model load FAILED: {e}")
                 await ws.send_json({"type": "error", "where": "asr_model_load", "error": str(e), "model_path": model_path})
@@ -1116,7 +1422,6 @@ async def asr_worker(ws: WebSocket, st: State):
             if text:
                 append_text_line(txt_path, text)
 
-            # ★ jsonl に「この asr がどの設定で走ったか」を一緒に保存
             append_jsonl({
                 "type": "asr",
                 "ts": now_iso(),
@@ -1181,7 +1486,12 @@ async def ws_endpoint(ws: WebSocket):
     st.asr_task = asyncio.create_task(asr_worker(ws, st))
 
     try:
-        await ws.send_json({"type": "status", "msg": "connected", "patient_id": CURRENT["patient_id"], "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else "")})
+        await ws.send_json({
+            "type": "status",
+            "msg": "connected",
+            "patient_id": CURRENT["patient_id"],
+            "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else "")
+        })
 
         while True:
             if st.reset_pending:
@@ -1189,7 +1499,7 @@ async def ws_endpoint(ws: WebSocket):
                 st.reset_audio()
                 log("[WS] state reset (patient_changed)")
 
-            data = await ws.receive_bytes()  # float32 PCM
+            data = await ws.receive_bytes()
             x = np.frombuffer(data, dtype=np.float32)
             if x.size == 0:
                 continue
@@ -1228,14 +1538,12 @@ async def ws_endpoint(ws: WebSocket):
                             seg = st.finalize_segment()
                             if seg:
                                 await ws.send_json({"type": "saved", "patient_id": CURRENT["patient_id"], **seg})
-
                                 try:
                                     st.asr_q.put_nowait(seg)
                                     log(f"[ASR_Q] enqueued seg#{seg['seg_id']:03d} dur={seg['dur']}s wav={seg['wav']}")
                                 except asyncio.QueueFull:
                                     log(f"[ASR_Q] DROP seg#{seg['seg_id']:03d} (queue full)")
                                     await ws.send_json({"type": "asr_drop", "seg_id": seg["seg_id"], "reason": "asr_q full"})
-
                             continue
 
                     dur = sum(a.shape[0] for a in st.utter_frames) / SR
@@ -1260,7 +1568,7 @@ async def ws_endpoint(ws: WebSocket):
 # -------------------------
 if __name__ == "__main__":
     log(f"[APP] start SR={SR} frame={FRAME_MS}ms threshold={THRESHOLD_DB} dyna_dir={DYNA_WATCH_DIR}")
-    SSL_CFG = CFG.get("ssl", {})
+    SSL_CFG = CFG.get("ssl", {}) or {}
 
     if SSL_CFG.get("enabled"):
         uvicorn.run(

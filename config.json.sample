@@ -1,7 +1,7 @@
 {
   "version": 1,
 
-  "dyna_watch_dir": "/home/yuki/DynaID",
+  "dyna_watch_dir": "D:/DynaID",
   "dyna_glob": "dyna*.txt",
   "delete_after_read": true,
 
@@ -23,17 +23,17 @@
     "model_id": "kotoba-v2.0",
 
     "models": {
-      "small": "/home/yuki/.cache/huggingface/hub/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120",
-      "medium": "/home/yuki/.cache/huggingface/hub/models--Systran--faster-whisper-medium/snapshots/08e178d48790749d25932bbc082711ddcfdfbc4f",
-      "large-v3": "/home/yuki/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478",
-      "large-v3-turbo": "/home/yuki/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/snapshots/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
-      "kotoba-v2.0": "/home/yuki/.cache/huggingface/hub/models--kotoba-tech--kotoba-whisper-v2.0-faster/snapshots/f44edd35eaeb2274e85ac7b31fb2c6f59ff1c4bc"
+      "small": "asr_models/small",
+      "medium": "asr_models/models--Systran--faster-whisper-medium",
+      "large-v3": "asr_models/models--Systran--faster-whisper-large-v3",
+      "large-v3-turbo": "asr_models/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo",
+      "kotoba-v2.0": "asr_models/models--kotoba-tech--kotoba-whisper-v2.0-faster"
     },
 
     "language": "ja",
     "device": "cuda",
     "compute_type": "float16",
-    "beam_size": 10,
+    "beam_size": 5,
     "temperature": 0.0,
     "condition_on_previous_text": false,
     "initial_prompt": "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。薬剤名は聞こえた通りに。"
@@ -41,7 +41,7 @@
 
   "llm": {
     "host": "http://127.0.0.1:11434",
-    "model_default": "gpt-oss:20b",
+    "model_default": "gemma3:12b",
     "timeout": 120,
     "temperature": 0.0,
     "top_p": 0.9,
