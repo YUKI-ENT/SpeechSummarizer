@@ -7,6 +7,7 @@ import wave
 import json
 import datetime
 import asyncio
+import sys
 from pathlib import Path
 from urllib.parse import unquote
 import re
@@ -40,7 +41,16 @@ import hashlib
 # -------------------------
 # Config
 # -------------------------
-CONFIG_PATH = Path("config.json")
+def get_app_dir() -> Path:
+    # PyInstaller等で frozen のときは exe の場所
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    # 通常実行時はこの .py の場所
+    return Path(__file__).resolve().parent
+
+APP_DIR = get_app_dir()
+CONFIG_PATH = APP_DIR / "config.json"
+
 _CONFIG_CACHE: Optional[dict] = None
 
 def load_config(force_reload: bool = False) -> dict:
@@ -84,14 +94,17 @@ CFG = load_config()
 
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
+def resolve_relpath(p: str | Path) -> Path:
+    p = Path(p)
+    return p if p.is_absolute() else (APP_DIR / p)
 
-OUTPUTS_DIR = Path(CFG.get("outputs_dir", "data/sessions"))
-WAV_DIR = Path(CFG.get("wav_dir", "data/wav"))
+OUTPUTS_DIR = resolve_relpath(CFG.get("outputs_dir", "data/sessions"))
+WAV_DIR = resolve_relpath(CFG.get("wav_dir", "data/wav"))
 ensure_dir(OUTPUTS_DIR)
 ensure_dir(WAV_DIR)
 
-CORRECTION_RULES_PATH = Path(CFG.get("correction_rules_path", "corrections.json"))
-CORRECTIONS_DIR = Path(CFG.get("corrections_dir", "data/corrections"))
+CORRECTION_RULES_PATH = resolve_relpath(CFG.get("correction_rules_path", "corrections.json"))
+CORRECTIONS_DIR = resolve_relpath(CFG.get("corrections_dir", "data/corrections"))
 ensure_dir(CORRECTIONS_DIR)
 _CORRECTION_CACHE: Optional[dict] = None
 
@@ -349,7 +362,7 @@ OLLAMA_TOP_P = float(LLM_CFG.get("top_p") or 0.9)
 LLM_PROMPTS: Dict[str, Dict[str, Any]] = LLM_CFG.get("prompts", {})  # ★ dictのまま
 LLM_DEFAULT_PROMPT_ID = (LLM_CFG.get("default_prompt_id") or "soap_v1").strip()
 
-LLM_DIR = Path(CFG.get("llm_outputs_dir", "data/llm"))
+LLM_DIR = resolve_relpath(CFG.get("llm_outputs_dir", "data/llm"))
 ensure_dir(LLM_DIR)
 
 def _safe_name(s: str) -> str:
@@ -697,7 +710,7 @@ def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
 # -------------------------
 # dyna watcher
 # -------------------------
-DYNA_WATCH_DIR = Path(CFG.get("dyna_watch_dir", "/home/yuki/SpeechID"))
+DYNA_WATCH_DIR = resolve_relpath(CFG.get("dyna_watch_dir", "data/SpeechID"))
 DYNA_GLOB = CFG.get("dyna_glob", "dyna*.txt")
 DYNA_DELETE_AFTER_READ = bool(CFG.get("delete_after_read", True))
 
@@ -818,12 +831,13 @@ def _parse_session_name(name: str):
 # -------------------------
 # Web
 # -------------------------
+STATIC_DIR = APP_DIR / "static"
 app = FastAPI()
-app.mount("/static", StaticFiles(directory="static"), name="static")
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/")
 async def index():
-    return FileResponse("static/index.html")
+    return FileResponse(str(STATIC_DIR / "index.html"))
 
 @app.on_event("startup")
 async def _startup():
