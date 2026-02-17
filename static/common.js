@@ -205,11 +205,18 @@
     }
   }
 
+  // function getSessionForLlm(){
+  //   // 録音中は server が送ってくる currentSessionTxt を優先
+  //   if (btnStart && btnStart.disabled && currentSessionTxt) return currentSessionTxt;
+  //   return (selSession?.value || '').trim();
+  // }
   function getSessionForLlm(){
-    // 録音中は server が送ってくる currentSessionTxt を優先
-    if (btnStart && btnStart.disabled && currentSessionTxt) return currentSessionTxt;
+    // 画面が「今のセッション」を持っているなら、常にそれを使う
+    // （selSession に古い別患者が残っていても誤爆しない）
+    if (currentSessionTxt) return currentSessionTxt;
     return (selSession?.value || '').trim();
   }
+
 
   async function loadLlmHistory(){
     if (!selSoapHistory) return;
@@ -268,9 +275,16 @@
       const data = await res.json();
       const items = data.items || [];
       const prev = selSession.value;
+
       selSession.innerHTML = '<option value="">認識履歴</option>' +
         items.map(it => `<option value="${it.name}">${it.label}</option>`).join('');
-      if (prev && items.some(it => it.name === prev)) selSession.value = prev;
+
+      // ★今のセッションがあればそれを最優先
+      if (currentSessionTxt && items.some(it => it.name === currentSessionTxt)){
+        selSession.value = currentSessionTxt;
+      }else if (prev && items.some(it => it.name === prev)){
+        selSession.value = prev;
+      }
     }catch(e){
       log('[sessions] ERROR: ' + e);
     }
