@@ -13,6 +13,16 @@ models/
 *.log
 *.jsonl
 *.txt
+config.json
+
+# PyInstaller build artifacts
+/build/
+/dist/
+
+# Release artifacts
+/release/
+*.zip
+*.exe
 
 # secrets
 .env

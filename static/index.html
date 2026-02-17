@@ -4,7 +4,7 @@
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SpeechSummarizer</title>
-
+  <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
   <link rel="stylesheet" href="/static/style.css">
 </head>
 
@@ -13,7 +13,7 @@
   <div class="nav">
     <div class="brand">
       <div class="title">SpeechSummarizer</div>
-      <div class="sub">AI音声認識システム</div>
+      <div class="sub">ver20260217</div>
     </div>
 
     <div class="nav-center">
@@ -53,61 +53,54 @@
     <div class="card patient-card">
       <div class="hd">
         <h3>ASR情報</h3>
-        <select id="selSession" class="select" title="過去の認識結果">
-          <option value="">認識履歴</option>
-        </select>
-
       </div>
       <div class="bd">
         <div class="meta-row">
           <span class="meta-item">ID: <b id="patientId">(未設定)</b></span>
           <span class="meta-sep">/</span>
           <span class="meta-item">ASR: <b id="asrModelName">(未設定)</b></span>
+          <select id="selSession" class="select" title="過去の認識結果">
+            <option value="">認識履歴</option>
+          </select>
         </div>
       </div>
 
-      <div class="hd">
-        <h3>認識テキスト</h3>
-        
-        <div class="summary-ctrl">
-          <div class="ctrl-row row1">
-            <button class="btn btn-sm" id="btnCorrectAsr" title="認識テキストをルールで補正">補正</button>
-            <button class="btn btn-sm" id="btnRebuild" title="JSONL原本から .txt を再生成して戻す">元に戻す</button>
-            <button class="btn btn-sm" id="btnCopyAsr" title="音声認識結果をコピー">Copy</button>
+      <!-- 認識＆要約：2列レイアウト -->
+      <div class="bd split-2col">
+        <section class="pane">
+          <div class="pane-hd">
+            <h3>認識テキスト</h3>
+            <div class="pane-tools">
+              <button class="btn btn-sm" id="btnCorrectAsr" title="認識テキストをルールで補正">補正</button>
+              <button class="btn btn-sm" id="btnRebuild" title="JSONL原本から .txt を再生成して戻す">元に戻す</button>
+              <button class="btn btn-sm" id="btnCopyAsr" title="音声認識結果をコピー">Copy</button>
+            </div>
           </div>
-        </div>
-      </div>
-      <div class="bd">
-        <textarea id="transcript" class="transcript" spellcheck="false"></textarea>
-      </div>
+          <textarea id="transcript" class="transcript" spellcheck="false"></textarea>
+        </section>
 
-      <div class="hd summary-block">
-        <h3 class="summary-title">AI処理</h3>
+        <section class="pane">
+          <div class="pane-hd">
+            <h3>AI処理</h3>
+            <div class="pane-tools">
+              <select id="selLlmModel" class="select select-sm" title="LLMモデル">
+                <option value="">LLM model...</option>
+              </select>
+              <select id="selSoapPrompt" class="select select-sm" title="プロンプト">
+                <option value="">Prompt...</option>
+              </select>
+              <button class="btn btn-primary btn-sm" id="btnSoap" title="Ollamaで処理">送信</button>
 
-        <!-- 右側：2行固定 -->
-        <div class="summary-ctrl">
-          <div class="ctrl-row row1">
-            <select id="selLlmModel" class="select select-sm" title="LLMモデル">
-              <option value="">LLM model...</option>
-            </select>
-            <select id="selSoapPrompt" class="select select-sm" title="プロンプト">
-              <option value="">Prompt...</option>
-            </select>
-            <button class="btn btn-primary btn-sm" id="btnSoap" title="Ollamaで処理">送信</button>
+              <select id="selSoapHistory" class="select select-sm" title="過去要約一覧">
+                <option value="">履歴…</option>
+              </select>
+              <button class="btn btn-sm" id="btnCopySoap" title="AI処理結果をコピー">Copy</button>
+            </div>
           </div>
-
-          <div class="ctrl-row row2">
-            <select id="selSoapHistory" class="select select-sm" title="過去要約一覧">
-              <option value="">履歴…</option>
-            </select>
-            <button class="btn btn-sm" id="btnCopySoap" title="AI処理結果をコピー">Copy</button>
-          </div>
-        </div>
+          <textarea id="summary" class="summary" spellcheck="false" placeholder="AI処理結果"></textarea>
+        </section>
       </div>
 
-      <div class="bd summary-block">
-        <textarea id="summary" class="summary" spellcheck="false" placeholder="AI処理結果"></textarea>
-      </div>
     </div>
 
     <!-- Right: log -->

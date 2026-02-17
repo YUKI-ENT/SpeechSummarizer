@@ -20,14 +20,15 @@
 
   "asr": {
     "enabled": true,
-    "model_id": "kotoba-v2.0",
+    "model_id": "kotoba-v2.2",
 
     "models": {
       "small": "/home/yuki/.cache/huggingface/hub/models--Systran--faster-whisper-small/snapshots/536b0662742c02347bc0e980a01041f333bce120",
       "medium": "/home/yuki/.cache/huggingface/hub/models--Systran--faster-whisper-medium/snapshots/08e178d48790749d25932bbc082711ddcfdfbc4f",
       "large-v3": "/home/yuki/.cache/huggingface/hub/models--Systran--faster-whisper-large-v3/snapshots/edaa852ec7e145841d8ffdb056a99866b5f0a478",
       "large-v3-turbo": "/home/yuki/.cache/huggingface/hub/models--mobiuslabsgmbh--faster-whisper-large-v3-turbo/snapshots/0a363e9161cbc7ed1431c9597a8ceaf0c4f78fcf",
-      "kotoba-v2.0": "/home/yuki/.cache/huggingface/hub/models--kotoba-tech--kotoba-whisper-v2.0-faster/snapshots/f44edd35eaeb2274e85ac7b31fb2c6f59ff1c4bc"
+      "kotoba-v2.0": "/home/yuki/.cache/huggingface/hub/models--kotoba-tech--kotoba-whisper-v2.0-faster/snapshots/f44edd35eaeb2274e85ac7b31fb2c6f59ff1c4bc",
+      "kotoba-v2.2": "models/kotoba-whisper-v2.2-faster"
     },
 
     "language": "ja",
@@ -52,9 +53,9 @@
         "label": "SOAP(発熱重視)",
         "template": "以下は医者と患者の診察室での会話（主に医者の発言）です。音声認識のため同音異義語(「咳」→「席」、「鼻」→「花」など)が混ざります。それを考慮して、SOAP形式に要約してください。\n\n重要な制約:\n- 勝手に情報を追加しない（会話に無いことは書かない）\n- 不明なことは「不明」とし、推測しない\n- 可能なら箇条書き、特にS)の部分はなるべく時系列で簡潔に\n -体温と思われる情報は必ずSに記載 \n出力はSOAPのみ（前置き不要）。\n\n【会話テキスト】\n{asr_text}\n"
       },
-      "soap_v1_short": {
-        "label": "SOAP(短め)",
-        "template": "以下は診察会話で主に医者の発言部分のテキストです。推測せずSOAPで簡潔に要約してください。会話に無い情報は書かない。\n\n【会話テキスト】\n{asr_text}\n"
+      "translate": {
+        "label": "英語翻訳",
+        "template": "以下は診察会話を英語に翻訳してください。主に医者の発言部分のテキストですが、音声認識のため変換ミスが見られます。「咳」→「席」、「鼻」→「花」など文脈から間違いと思われるものを修正し、質問に対する返答の「うん」「はい」「ええ」等は必ず残し、言ってもないことを追加することなく、英語で出力してください。【会話テキスト】\n{asr_text}\n"
       },
       "yomi_correct": {
         "label": "誤変換訂正",

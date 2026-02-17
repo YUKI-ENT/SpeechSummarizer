@@ -5,11 +5,6 @@
   --bg0:#070b18;
   --bg1:#0b1633;
 
-  --card: rgba(255,255,255,0.06);
-  --card2: rgba(255,255,255,0.04);
-  --bd: rgba(255,255,255,0.10);
-  --bd2: rgba(255,255,255,0.16);
-
   --txt: rgba(255,255,255,0.92);
   --muted: rgba(255,255,255,0.62);
   --muted2: rgba(255,255,255,0.45);
@@ -23,14 +18,12 @@
   --page-top: calc(var(--nav-h) + 16px);
   --page-bottom: 18px;
 
-  /* Transcript / Summary sizing */
-  --tx-size: 12px;
+  /* Text sizing */
+  --tx-size: 14px;
   --tx-line: 1.2;
-  --tx-min-h: 160px;
 
   --sum-size: 18px;
   --sum-line: 1.4;
-  --sum-min-h: 360px;
 }
 
 *{ box-sizing: border-box; }
@@ -46,13 +39,10 @@ html{
 body{
   margin:0;
   min-height: 100%;
-  background: transparent; /* 背景はhtmlに任せる（横線対策） */
+  background: transparent;
   color: var(--txt);
   font-family: system-ui, -apple-system, "Segoe UI", "Hiragino Kaku Gothic ProN", Meiryo, sans-serif;
-  padding-top: var(--page-top);
-  padding-left: var(--page-x);
-  padding-right: var(--page-x);
-  padding-bottom: var(--page-bottom);
+  padding: var(--page-top) var(--page-x) var(--page-bottom);
   overflow-x: hidden;
 }
 
@@ -88,15 +78,29 @@ a{ color: inherit; }
   background: rgba(255,80,80,0.14);
   border-color: rgba(255,80,80,0.30);
 }
-
 .btn-sm{
   padding: 8px 10px;
   font-size: 13px;
   min-height: 36px;
 }
-
+.pill{
+  display:inline-flex;
+  gap: 8px;
+  align-items:center;
+  padding: 8px 10px;
+  border-radius: 999px;
+  background: rgba(255,255,255,0.06);
+  border: 1px solid rgba(255,255,255,0.10);
+  font-size: 12px;
+  color: var(--muted);
+  white-space: nowrap;
+}
+/* select base */
 select.select,
 select.btn{
+  -webkit-appearance: none;
+  appearance: none;
+
   color: #fff;
   background: rgba(0,0,0,0.30);
   border: 1px solid rgba(255,255,255,0.14);
@@ -111,9 +115,6 @@ select.btn{
   text-overflow: ellipsis;
   overflow: hidden;
   white-space: nowrap;
-
-  -webkit-appearance: none;
-  appearance: none;
 }
 select.select:focus,
 select.btn:focus{
@@ -133,7 +134,7 @@ select.btn option{
   font-size: 13px;
 }
 
-/* ナビのASR/Session selectを強調（必要なら残す） */
+/* ナビのASR/Session selectを強調 */
 #selAsrModel,
 #selSession{
   color: #fff !important;
@@ -155,7 +156,7 @@ select.btn option{
   border-radius: 12px;
   background: rgba(255,255,255,0.06);
   border: 1px solid rgba(255,255,255,0.10);
-  font-size: 12px;
+  font-size: 16px;
   color: var(--muted);
   user-select: none;
 }
@@ -221,27 +222,6 @@ select.btn option{
   align-items: center;
   padding-right: 6px;
 }
-
-.pill{
-  display:inline-flex;
-  gap: 8px;
-  align-items:center;
-  padding: 8px 10px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.06);
-  border: 1px solid rgba(255,255,255,0.10);
-  font-size: 12px;
-  color: var(--muted);
-  white-space: nowrap;
-}
-
-.dot{
-  width: 8px; height: 8px;
-  border-radius: 999px;
-  background: rgba(255,255,255,0.30);
-}
-.dot.ok{ background: rgba(120,255,180,0.85); }
-.dot.bad{ background: rgba(255,120,120,0.85); }
 
 /* Record button (mic) */
 .btn.btn-rec{
@@ -325,45 +305,82 @@ select.btn option{
 }
 
 /* =========================
-   Transcript / Summary / Log
+   Split layout: transcript | summary
    ========================= */
-textarea.transcript{
+.split-2col{
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 14px;
+}
+
+.pane{
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+}
+
+.pane-hd{
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid rgba(255,255,255,0.08);
+  border-radius: 14px;
+  background: rgba(0,0,0,0.18);
+}
+.pane-hd h3{
+  margin: 0;
+  font-size: 13px;
+  color: rgba(255,255,255,0.80);
+  white-space: nowrap;
+}
+
+.pane-tools{
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+}
+
+/* Textareas */
+textarea.transcript,
+textarea.summary{
   width: 100%;
-  min-height: var(--tx-min-h);
   resize: vertical;
 
-  padding: 16px;
+  padding: 14px 16px;
   border-radius: 16px;
   border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(0,0,0,0.35);
+  background: rgba(0,0,0,0.30);
   color: #fff;
 
   font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: var(--tx-size);
-  line-height: var(--tx-line);
   white-space: pre-wrap;
-
-  max-height: calc(100vh - var(--page-top) - 160px);
   overflow-y: auto;
 }
 
-textarea.summary{
-  width: 100%;
-  min-height: var(--sum-min-h);
-  resize: vertical;
-
-  padding: 12px;
-  border-radius: 16px;
-  border: 1px solid rgba(255,255,255,0.10);
-  background: rgba(0,0,0,0.25);
-  color: #fff;
-
-  font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, monospace;
-  font-size: var(--sum-size);
-  line-height: var(--sum-line);
-  white-space: pre-wrap;
+textarea.transcript{
+  font-size: var(--tx-size);
+  line-height: var(--tx-line);
+  background: rgba(0,0,0,0.35);
 }
 
+textarea.summary{
+  font-size: var(--sum-size);
+  line-height: var(--sum-line);
+  background: rgba(0,0,0,0.25);
+}
+
+.pane textarea{
+  flex: 1 1 auto;
+  min-height: 60vh;
+  max-height: calc(100vh - var(--page-top) - 180px);
+}
+
+/* Log */
 #log{
   white-space: pre-wrap;
   height: 400px;
@@ -374,56 +391,6 @@ textarea.summary{
   padding: 12px;
   font-size: 12px;
   color: rgba(255,255,255,0.80);
-}
-
-/* =========================
-   AI処理ヘッダ（2行固定）
-   ========================= */
-.hd.summary-block{
-  align-items: center;
-  gap: 12px;
-}
-
-.summary-title{
-  margin: 0;
-  flex: 0 0 auto;
-  white-space: nowrap;
-}
-
-.summary-ctrl{
-  flex: 1 1 auto;
-  min-width: 0;
-  display: grid;
-  grid-template-rows: auto auto;
-  row-gap: 8px;
-}
-
-.ctrl-row{
-  display: flex;
-  gap: 8px;
-  align-items: center;
-  justify-content: flex-end;
-  flex-wrap: nowrap;
-  min-width: 0;
-}
-
-.ctrl-row .select-sm{
-  min-width: 180px;
-  max-width: 34vw;
-}
-
-.ctrl-row .btn-sm{ flex: 0 0 auto; }
-
-@media (max-width: 600px){
-  .ctrl-row{
-    flex-wrap: wrap;
-    justify-content: flex-start;
-  }
-  .ctrl-row .select-sm{
-    min-width: 140px;
-    max-width: 100%;
-    flex: 1 1 220px;
-  }
 }
 
 /* =========================
@@ -438,7 +405,7 @@ body.log-shown #btnToggleLog{
 }
 
 /* =========================
-   Hearing Mode
+   Hearing Mode (字幕全画面)
    ========================= */
 body.hearing{
   --tx-size: 72px;
@@ -447,13 +414,20 @@ body.hearing{
 
 body.hearing .grid{ grid-template-columns: 1fr; }
 body.hearing .card.log-card{ display: none; }
-body.hearing .summary-block{ display: none; }
 
-body.hearing #patientId{ font-size: 40px; }
+/* 2列→1列、右ペインを消す */
+body.hearing .split-2col{
+  grid-template-columns: 1fr !important;
+}
+body.hearing .split-2col .pane:nth-child(2){
+  display: none !important;
+}
 
+/* transcript を“画面いっぱい”にする */
 body.hearing textarea.transcript{
-  height: calc(100vh - var(--page-top) - 130px);
-  max-height: none;
+  height: calc(100vh - var(--page-top) - 120px) !important;
+  max-height: none !important;
+  min-height: 0 !important;
   padding: 26px;
   border: 2px solid rgba(255,255,255,0.16);
   background: rgba(0,0,0,0.55);
@@ -471,4 +445,7 @@ body.hearing textarea.transcript{
 
   .nav-right{ justify-content: flex-start; flex-wrap: wrap; }
   .nav-center{ justify-content: flex-start; }
+
+  .split-2col{ grid-template-columns: 1fr; }
+  .pane textarea{ min-height: 42vh; }
 }

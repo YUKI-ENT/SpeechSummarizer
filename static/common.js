@@ -489,6 +489,11 @@
         if (msg.type === 'status') {
           setPatient(msg.patient_id);
           if (msg.session_txt) currentSessionTxt = msg.session_txt;
+          
+          // ★追加：サーバがmetaを返しているなら確定表示
+          if (msg.meta) setAsrModelNameFromMeta(msg.meta);
+          else if (msg.asr_model && asrModelNameEl) asrModelNameEl.textContent = msg.asr_model;
+
           log('[status] ' + msg.msg + (msg.session_txt ? ' session=' + msg.session_txt : ''));
           loadLlmHistory();
         }
@@ -560,6 +565,12 @@
 
       if(btnRebuild) btnRebuild.disabled = true;
       if(btnCorrectAsr) btnCorrectAsr.disabled = true;
+
+      // 録音開始時点の選択モデルを表示（metaが来るまでの暫定表示）
+      if (asrModelNameEl) {
+        const label = selAsrModel?.selectedOptions?.[0]?.textContent || selAsrModel?.value || '(未設定)';
+        asrModelNameEl.textContent = label;
+      }
 
       clearTranscript();
       clearSummary();
