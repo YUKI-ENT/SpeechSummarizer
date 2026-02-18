@@ -294,10 +294,28 @@ CURRENT = {
     }
 }
 
+def _normalize_jsonl_text(v: str) -> str:
+    """
+    JSONL安全化：改行・タブ等をスペースに潰し、連続空白を整理。
+    1行=1JSON を壊さないための責務を append_jsonl に閉じ込める。
+    """
+    if not isinstance(v, str):
+        return v
+    v = v.replace("\r", " ").replace("\n", " ").replace("\t", " ")
+    v = re.sub(r"\s{2,}", " ", v)
+    return v.strip()
+
+
 def append_jsonl(obj: dict, jsonl_path: str):
+    # text / transcript / summary など「改行が入りうるフィールド」を安全化
+    for k in ("text", "transcript", "summary"):
+        if k in obj and isinstance(obj[k], str):
+            obj[k] = _normalize_jsonl_text(obj[k])
+
     line = json.dumps(obj, ensure_ascii=False)
     with open(jsonl_path, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+
 
 def append_text_line(text_path: str, s: str):
     with open(text_path, "a", encoding="utf-8") as f:
@@ -1416,7 +1434,12 @@ async def asr_worker(ws: WebSocket, st: State):
                 no_speech_list.append(getattr(s, "no_speech_prob", None))
                 comp_ratio_list.append(getattr(s, "compression_ratio", None))
 
-            text = "".join(texts).strip()
+            # UI / .txt 用：セグメントごとに改行
+            text_ui = "\n".join(texts).strip()
+
+            # 品質判定は「改行無し」のほうが安定するなら、ここで潰した版を使う
+            text_for_judge = text_ui.replace("\r", " ").replace("\n", " ").strip()
+
             dt = time.time() - t0
 
             asr_meta = {
@@ -1426,16 +1449,18 @@ async def asr_worker(ws: WebSocket, st: State):
                 "compression_ratio": round_or_none(safe_avg(comp_ratio_list), 3),
             }
 
-            quality, reasons = judge_quality(audio_meta, asr_meta, text)
+            quality, reasons = judge_quality(audio_meta, asr_meta, text_for_judge)
 
             ensure_unknown_session()
             pid = CURRENT["patient_id"]
             txt_path = CURRENT["text_path"]
             jsonl_path = CURRENT["jsonl_path"]
 
-            if text:
-                append_text_line(txt_path, text)
+            # .txt には読みやすさ優先で改行入りを保存
+            if text_ui:
+                append_text_line(txt_path, text_ui)
 
+            # JSONL には改行入りを渡してOK（append_jsonl 側で改行を潰して1行保証）
             append_jsonl({
                 "type": "asr",
                 "ts": now_iso(),
@@ -1443,7 +1468,7 @@ async def asr_worker(ws: WebSocket, st: State):
                 "seg_id": seg_id,
                 "dur": dur,
                 "wav": wav,
-                "text": text,
+                "text": text_ui,
                 "asr_cfg": {
                     "model_name": cfg_rt.get("model_name"),
                     "model_path": cfg_rt.get("model_path"),
@@ -1460,16 +1485,17 @@ async def asr_worker(ws: WebSocket, st: State):
                 f"[ASR] done seg#{seg_id:03d} sec={dt:.2f} "
                 f"q={quality} reasons={reasons} "
                 f"rms={audio_meta.get('rms_dbfs')} no_speech={asr_meta.get('no_speech_prob')} "
-                f"comp={asr_meta.get('compression_ratio')} text_head={text[:60]!r}"
+                f"comp={asr_meta.get('compression_ratio')} text_head={text_for_judge[:60]!r}"
             )
 
+            # WebSocket へは改行入り表示を送る
             await ws.send_json({
                 "type": "asr",
                 "patient_id": pid,
                 "seg_id": seg_id,
                 "dur": dur,
                 "wav": wav,
-                "text": text,
+                "text": text_ui,
                 "asr_cfg": {
                     "model_name": cfg_rt.get("model_name"),
                     "model_path": cfg_rt.get("model_path"),

@@ -528,7 +528,7 @@
 
         if (msg.type === 'asr') {
           if (msg.text) {
-            transcript += (transcript ? ' ' : '') + msg.text;
+            transcript += (transcript ? '\n' : '') + msg.text;
             if (txEl){
               txEl.value = transcript;
               txEl.scrollTop = txEl.scrollHeight;
