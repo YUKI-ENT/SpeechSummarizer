@@ -18,7 +18,7 @@ SpeechSummarizer は、医療現場向けに設計されたリアルタイム音
 
 ## インストール方法
 
-###【Windows版（EXE）】
+### 【Windows版（EXE）】
 
 1. release の zip をダウンロード
 2. 任意のフォルダに展開
