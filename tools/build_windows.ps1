@@ -2,155 +2,92 @@
 # Windows 用: venv作成 → 依存導入 → PyInstaller(onedir) → VC++ DLL削除 → zip作成
 # 使い方:
 #   powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1
+# models を同梱しないなら：
+#   powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1  -IncludeModels:$false
 # オプション:
-#   -PythonExe "py" -PythonVersion "3.11" -Clean -NoZip
+#   -PythonExe "py" -PythonVersion "3.12" -Clean -NoZip
 
 param(
-  [string]$PythonExe = "py",
-  [string]$PythonVersion = "3.11",
-  [switch]$Clean,
-  [switch]$NoZip
+  [string]$Name = "SpeechSummarizer",
+  [string]$Entry = "app.py",
+  [string]$DistDir = "dist",
+  [string]$BuildDir = "build",
+  [string]$OutDir = "release",
+  [switch]$IncludeModels = $true   # models/を同梱しないなら -IncludeModels:$false
 )
 
 $ErrorActionPreference = "Stop"
+Set-StrictMode -Version Latest
 
-# プロジェクトルートへ移動（このps1の2階層上を想定：tools/配下）
-$SCRIPT_DIR = Split-Path -Parent $MyInvocation.MyCommand.Path
-$ROOT = Resolve-Path (Join-Path $SCRIPT_DIR "..")
-Set-Location $ROOT
-
-# ---- 設定 ----
-$VenvDir = ".venv-win"
-$AppPy = "app.py"
-$AppName = "SpeechSummarizer"
-$DistDir = Join-Path $ROOT "dist"
-$BuildDir = Join-Path $ROOT "build"
-$ReleaseDir = Join-Path $ROOT "release"
-$Stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-$OutZip = Join-Path $ReleaseDir "${AppName}_win_x64_${Stamp}.zip"
-
-# requirements
-$ReqFile = "requirements-win.txt"
-if (-not (Test-Path $ReqFile)) {
-  # fallback
-  $ReqFile = "requirements.txt"
+function Assert-Exists([string]$Path){
+  if (!(Test-Path $Path)) { throw "Not found: $Path" }
 }
 
-# 同梱データ（onedirの実行フォルダ基準で読む想定）
-$AddDataArgs = @(
-  "--add-data", "static;static",
-  "--add-data", "config.json;."
-)
+# どこから実行されても repo ルートに合わせる
+$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+$RepoRoot  = Resolve-Path (Join-Path $ScriptDir "..")
+Push-Location $RepoRoot
 
-# collect対象（faster-whisper/ct2）
-$CollectArgs = @(
-  "--collect-all", "faster_whisper",
-  "--collect-all", "ctranslate2",
-  "--collect-all", "tokenizers"
-)
+try {
+  Assert-Exists $Entry
 
-# VC++ DLL（同梱するとクラッシュするケースがあったため削除対象）
-$BadVCDlls = @(
-  "MSVCP140.dll",
-  "VCRUNTIME140.dll",
-  "VCRUNTIME140_1.dll",
-  "CONCRT140.dll"
-)
+  # 依存の前提：venvはユーザーが手動で有効化済み、pyinstallerも入っていること
+  $py = (Get-Command python -ErrorAction Stop).Source
+  Write-Host "[build] python=$py"
 
-# ---- 事前チェック ----
-if (-not (Test-Path $AppPy)) {
-  throw "Not found: $AppPy (project root: $ROOT)"
-}
-if (-not (Test-Path "static")) {
-  Write-Warning "static/ not found. If your app needs it, build will succeed but UI may be broken."
-}
-if (-not (Test-Path "config.json")) {
-  Write-Warning "config.json not found. Build will succeed but runtime will fail."
-}
-
-# ---- Clean ----
-if ($Clean) {
-  Write-Host "[CLEAN] removing dist/, build/, $VenvDir/"
-  if (Test-Path $DistDir) { Remove-Item $DistDir -Recurse -Force }
+  # 既存成果物を掃除（onedirはdist/$Name配下が本体なので、そこを消す）
+  if (Test-Path $DistDir)  { Remove-Item $DistDir  -Recurse -Force }
   if (Test-Path $BuildDir) { Remove-Item $BuildDir -Recurse -Force }
-  if (Test-Path $VenvDir) { Remove-Item $VenvDir -Recurse -Force }
-}
 
-# ---- venv ----
-if (-not (Test-Path $VenvDir)) {
-  Write-Host "[VENV] create $VenvDir using Python $PythonVersion"
-  & $PythonExe "-$PythonVersion" "-m" "venv" $VenvDir
-}
+  # --- PyInstaller: onedir ---
+  # 既に spec を使っているなら、この行を spec 呼び出しに置き換えてOK
+  # 例: python -m PyInstaller --noconfirm --clean "$Name.spec"
+  Write-Host "[build] PyInstaller onedir..."
+  python -m PyInstaller `
+    --noconfirm --clean `
+    --onedir `
+    --name $Name `
+    $Entry
 
-$VenvPython = Join-Path $ROOT "$VenvDir\Scripts\python.exe"
-$VenvPip = Join-Path $ROOT "$VenvDir\Scripts\pip.exe"
+  $AppDir = Join-Path $DistDir $Name
+  Assert-Exists $AppDir
 
-if (-not (Test-Path $VenvPython)) {
-  throw "venv python not found: $VenvPython"
-}
+  # --- 配布用ファイルを exe と同階層にコピー ---
+  # ここが今回の修正ポイント
+  Write-Host "[pack] Copy assets into $AppDir"
 
-Write-Host "[PIP] upgrade pip/wheel"
-& $VenvPython "-m" "pip" "install" "-U" "pip" "wheel" | Out-Host
+  $itemsToCopy = @(
+    "config.json",
+    "corrections.json",
+    "static",
+    "certs"
+  )
 
-Write-Host "[PIP] install requirements: $ReqFile"
-& $VenvPython "-m" "pip" "install" "-r" $ReqFile | Out-Host
+  if ($IncludeModels) { $itemsToCopy += "models" }
 
-Write-Host "[PIP] install pyinstaller"
-& $VenvPython "-m" "pip" "install" "pyinstaller" | Out-Host
-
-# ---- PyInstaller build ----
-Write-Host "[BUILD] pyinstaller onedir: $AppName"
-$Args = @(
-  $AppPy,
-  "--name", $AppName,
-  "--noconfirm",
-  "--clean",
-  "--onedir"
-) + $CollectArgs + $AddDataArgs
-
-# console=True が良い間はこのまま。配布で黒窓不要なら "--noconsole" を追加してください。
-# $Args += @("--noconsole")
-
-& $VenvPython "-m" "PyInstaller" @Args | Out-Host
-
-$ExeDir = Join-Path $DistDir $AppName
-$InternalDir = Join-Path $ExeDir "_internal"
-$ExePath = Join-Path $ExeDir "$AppName.exe"
-
-if (-not (Test-Path $ExePath)) {
-  throw "Build failed: exe not found: $ExePath"
-}
-
-# ---- Post build cleanup (VC++ DLL remove) ----
-if (Test-Path $InternalDir) {
-  Write-Host "[POST] remove bundled VC++ DLLs from $InternalDir"
-  foreach ($dll in $BadVCDlls) {
-    $p = Join-Path $InternalDir $dll
-    if (Test-Path $p) {
-      Remove-Item $p -Force
-      Write-Host "  removed $dll"
+  foreach ($it in $itemsToCopy) {
+    if (Test-Path $it) {
+      Copy-Item $it -Destination $AppDir -Recurse -Force
+      Write-Host ("[pack] copied: " + $it)
+    } else {
+      Write-Host ("[pack] skip (not found): " + $it)
     }
   }
-} else {
-  Write-Warning "_internal not found: $InternalDir"
-}
 
-# ---- Release folder ----
-if (-not (Test-Path $ReleaseDir)) {
-  New-Item -ItemType Directory -Path $ReleaseDir | Out-Null
-}
+  # --- ZIP作成 ---
+  if (!(Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
 
-# ---- Zip ----
-if (-not $NoZip) {
-  if (Test-Path $OutZip) { Remove-Item $OutZip -Force }
-  Write-Host "[ZIP] create $OutZip from $ExeDir"
-  Compress-Archive -Path (Join-Path $ExeDir "*") -DestinationPath $OutZip
-}
+  $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
+  $zipName = "$Name-win64-onedir-$stamp.zip"
+  $zipPath = Join-Path $OutDir $zipName
 
-Write-Host ""
-Write-Host "[OK] EXE: $ExePath"
-if (-not $NoZip) {
-  Write-Host "[OK] ZIP: $OutZip"
+  if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
+
+  Write-Host "[zip] create: $zipPath"
+  Compress-Archive -Path $AppDir -DestinationPath $zipPath -Force
+
+  Write-Host "[done] $zipPath"
 }
-Write-Host ""
-Write-Host "Note: VC++ 2015-2022 (x64) Redistributable should be installed on target PCs."
+finally {
+  Pop-Location
+}
