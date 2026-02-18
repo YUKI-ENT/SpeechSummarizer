@@ -114,8 +114,14 @@ pip install -r requirements.txt
       ```
 
 ## ASRモデルのダウンロード方法
-- Huggingfaceのサイト： https://huggingface.co/collections/Systran/faster-whisper や https://huggingface.co/RoachLin/kotoba-whisper-v2.2-faster の `Files and versions`タブにあるファイルすべてを、
-  指定フォルダにダウンロードします。
+- 初期状態ではsmallモデルを同梱しておりますが、以下の手順でより高性能モデルを利用できます。
+- Huggingfaceのサイト： 
+
+  https://huggingface.co/collections/Systran/faster-whisper や
+  
+  https://huggingface.co/RoachLin/kotoba-whisper-v2.2-faster
+
+  の `Files and versions`タブにあるファイルすべてを、指定フォルダにダウンロードします。
 - そのフォルダを、`config.json`の`"models": `セクションに追加し、サーバーを再起動してください。
   ```
     例：
