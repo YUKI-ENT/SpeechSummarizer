@@ -14,7 +14,7 @@ models/
 *.log
 *.jsonl
 *.txt
-config.json
+/config.json
 
 # PyInstaller build artifacts
 /build/
