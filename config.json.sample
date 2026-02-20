@@ -9,7 +9,8 @@
   "wav_dir": "data/wav",
   "llm_outputs_dir": "data/llm",
   "correction_rules_path": "./corrections.json",
-
+  "wav_expire_days": 7,
+  
   "port": 8000,
 
   "ssl": {

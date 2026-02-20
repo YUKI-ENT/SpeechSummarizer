@@ -21,6 +21,7 @@ import uvicorn
 from faster_whisper import WhisperModel
 import httpx
 import hashlib
+# from datetime import datetime, timedelta
 
 """
 =========================
@@ -505,6 +506,261 @@ def save_llm_summary(*, jsonl_path: Path, model: str, prompt_id: str, summary: s
     out_path.write_text(summary or "", encoding="utf-8")
     return fname
 
+# ==========================================
+# Auto LLM (sequential queue)
+# ==========================================
+
+AUTO_LLM_ENABLED = bool(CFG.get("auto_llm", False))
+AUTO_LLM_PROMPTS = CFG.get("auto_llm_prompts") or []
+if not isinstance(AUTO_LLM_PROMPTS, list):
+    AUTO_LLM_PROMPTS = []
+
+_auto_llm_q = None
+# 追加：同じjsonlを複数回 enqueue しない（WS切断が複数回起きても防ぐ）
+_auto_llm_enqueued: set[str] = set()
+
+def _normalize_auto_llm_item(it: dict) -> dict | None:
+    if not isinstance(it, dict):
+        return None
+    model_id = it.get("model_id")
+    prompt_id = it.get("prompt_id")
+    asr_correct = bool(it.get("asr_correct", False))
+    if not isinstance(model_id, str) or not model_id.strip():
+        return None
+    if not isinstance(prompt_id, str) or not prompt_id.strip():
+        return None
+    return {"model_id": model_id.strip(), "prompt_id": prompt_id.strip(), "asr_correct": asr_correct}
+
+def _has_auto_llm_done(jsonl_path: Path, *, model_id: str, prompt_id: str, asr_correct: bool) -> bool:
+    """
+    重複送信防止：同一jsonlに type=auto_llm_done が既にあればスキップ
+    """
+    try:
+        if not jsonl_path.exists():
+            return False
+        with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("type") != "auto_llm_done":
+                    continue
+                meta = rec.get("meta") or {}
+                if (meta.get("model_id") == model_id and
+                    meta.get("prompt_id") == prompt_id and
+                    bool(meta.get("asr_correct")) == bool(asr_correct)):
+                    return True
+        return False
+    except Exception:
+        return False
+
+def _has_llm_history_for_prompt(jsonl_path: Path, *, prompt_id: str) -> bool:
+    """
+    同一セッション（patient_id + stamp）で、同一 prompt_id のLLM出力ファイルが既に存在すれば True。
+    ※model は問わない（*扱い）＝「同一プロンプトが過去に走っていればスキップ」
+    """
+    try:
+        info = _session_from_jsonl_name(jsonl_path)
+        pid = info.get("patient_id", "")
+        stamp = info.get("stamp", "")
+        if not pid or not stamp:
+            return False
+
+        # save_llm_summary の命名に合わせる（modelはワイルドカード）
+        # {pid}_{stamp}__*__{prompt_id}__*.txt
+        pat = f"{pid}_{stamp}__*__{_safe_name(prompt_id)}__*.txt"
+        return any(LLM_DIR.glob(pat))
+    except Exception:
+        return False
+    
+def enqueue_auto_llm_for_session(jsonl_path: Path):
+    """
+    セッション終了（患者切替など）タイミングで、当該セッションのjsonlを自動でLLMに投げる。
+    """
+    global _auto_llm_q, _auto_llm_enqueued
+
+    if not AUTO_LLM_ENABLED:
+        return
+    if _auto_llm_q is None:
+        # startup前に呼ばれても落ちないように
+        _auto_llm_q = asyncio.Queue()
+
+    if not isinstance(jsonl_path, Path):
+        jsonl_path = Path(str(jsonl_path))
+
+    # ★追加：存在しないなら何もしない
+    if not jsonl_path.exists():
+        return
+    # ★追加：メモリ内ガード（同じjsonlを多重enqueueしない）
+    key = str(jsonl_path.resolve())
+    if key in _auto_llm_enqueued:
+        return
+    _auto_llm_enqueued.add(key)
+
+    # promptsを正規化して順番にqueueへ
+    for raw in AUTO_LLM_PROMPTS:
+        it = _normalize_auto_llm_item(raw)
+        if not it:
+            continue
+
+        # ★追加：同一promptの過去LLM履歴があればスキップ（患者移動/マイクOnOff連打対策）
+        if _has_llm_history_for_prompt(jsonl_path, prompt_id=it["prompt_id"]):
+            continue
+        # 既存：JSONLに auto_llm_done があるならスキップ（再起動後対策）
+        if _has_auto_llm_done(jsonl_path, **it):
+            continue
+
+        _auto_llm_q.put_nowait({
+            "jsonl_path": str(jsonl_path),
+            **it,  # model_id, prompt_id, asr_correct
+        })
+
+async def _auto_llm_worker():
+    """
+    1ワーカーで逐次処理（Ollama詰まり防止）
+    """
+    global _auto_llm_q
+    if _auto_llm_q is None:
+        _auto_llm_q = asyncio.Queue()
+
+    log(f"[AUTO_LLM] worker started enabled={AUTO_LLM_ENABLED} items={len(AUTO_LLM_PROMPTS)}")
+
+    while True:
+        job = await _auto_llm_q.get()
+        try:
+            await _run_auto_llm_job(job)
+        except Exception as e:
+            log(f"[AUTO_LLM] job failed: {e}")
+        finally:
+            _auto_llm_q.task_done()
+
+async def _run_auto_llm_job(job: dict):
+    jsonl_path = Path(job["jsonl_path"])
+    model_id = str(job["model_id"])
+    prompt_id = str(job["prompt_id"])
+    asr_correct = bool(job.get("asr_correct", False))
+
+    if not jsonl_path.exists():
+        return
+
+    # JSONLからASRテキストを復元（qualityフィルタも効くやつ）
+    # 既存関数：collect_asr_text_from_jsonl :contentReference[oaicite:2]{index=2}
+    asr_text = collect_asr_text_from_jsonl(jsonl_path, min_quality="good")
+    asr_text = (asr_text or "").strip()
+    if not asr_text:
+        return
+
+    # ASR補正（必要なら）
+    # 既存：load_correction_rules / apply_corrections :contentReference[oaicite:3]{index=3} :contentReference[oaicite:4]{index=4}
+    if asr_correct:
+        try:
+            rules = load_correction_rules()
+            asr_text, _stats = apply_corrections(asr_text, rules)
+        except Exception as e:
+            log(f"[AUTO_LLM] asr_correct failed: {e}")
+
+    # prompt生成（既存：build_prompt_from_cfg）:contentReference[oaicite:5]{index=5}
+    prompt = build_prompt_from_cfg(prompt_id, asr_text)
+
+    # Ollama呼び出し（既存：ollama_generate_text）:contentReference[oaicite:6]{index=6}
+    # httpx.Client()の同期処理なので event loop を塞がないよう to_thread に逃がす
+    def _call():
+        return ollama_generate_text(
+            host=OLLAMA_HOST,
+            model=model_id,
+            prompt=prompt,
+            timeout_sec=OLLAMA_TIMEOUT,
+            temperature=OLLAMA_TEMPERATURE,
+            top_p=OLLAMA_TOP_P,
+        )
+
+    t0 = time.time()
+    log(f"[AUTO_LLM] start jsonl={jsonl_path.name} model={model_id} prompt={prompt_id} asr_correct={asr_correct}")
+
+    resp = await asyncio.to_thread(_call)
+    summary = (resp.get("response") or "").strip()
+
+    dt = time.time() - t0
+    if not summary:
+        log(f"[AUTO_LLM] empty response jsonl={jsonl_path.name} model={model_id} prompt={prompt_id} dt={dt:.2f}s")
+        return
+
+    # 出力保存（既存：save_llm_summary）:contentReference[oaicite:7]{index=7}
+    out_name = save_llm_summary(jsonl_path=jsonl_path, model=model_id, prompt_id=prompt_id, summary=summary)
+
+    # JSONLに「完了」マーカーを追記して、再起動後の重複送信を抑止
+    append_jsonl({
+        "type": "auto_llm_done",
+        "ts": now_iso(),
+        "patient_id": _session_from_jsonl_name(jsonl_path).get("patient_id", CURRENT.get("patient_id")),
+        "meta": {
+            "model_id": model_id,
+            "prompt_id": prompt_id,
+            "asr_correct": asr_correct,
+            "dt_sec": round(dt, 2),
+            "llm_output": out_name,
+        }
+    }, jsonl_path)
+
+    log(f"[AUTO_LLM] done jsonl={jsonl_path.name} -> {out_name} dt={dt:.2f}s")
+
+# ==========================================
+# Auto LLM (on patient change / recording stop)
+# ==========================================
+
+AUTO_LLM_ENABLED = bool(CFG.get("auto_llm", False))
+AUTO_LLM_PROMPTS = CFG.get("auto_llm_prompts", []) or []
+AUTO_LLM_MIN_QUALITY = (CFG.get("auto_llm_min_quality") or "good").strip()
+
+# 既に投げた session(jsonl) を二重送信しないためのガード
+_AUTO_LLM_ENQUEUED: set[str] = set()
+
+# 自動LLM用キュー（逐次実行）
+AUTO_LLM_Q: asyncio.Queue[dict] = asyncio.Queue(maxsize=int(CFG.get("auto_llm_queue", 20)))
+
+def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str):
+    """
+    指定 jsonl を auto_llm_prompts に従ってキューに積む。
+    二重送信は _AUTO_LLM_ENQUEUED で防止。
+    """
+    if not AUTO_LLM_ENABLED:
+        return
+    if not jsonl_path or not jsonl_path.exists():
+        return
+    if not AUTO_LLM_PROMPTS:
+        return
+
+    key = str(jsonl_path.resolve())
+    if key in _AUTO_LLM_ENQUEUED:
+        return
+    _AUTO_LLM_ENQUEUED.add(key)
+
+    for p in AUTO_LLM_PROMPTS:
+        try:
+            model_id = (p.get("model_id") or "").strip() or OLLAMA_MODEL_DEFAULT
+            prompt_id = (p.get("prompt_id") or "").strip() or LLM_DEFAULT_PROMPT_ID
+            asr_correct = bool(p.get("asr_correct", False))
+
+            job = {
+                "type": "auto_llm",
+                "ts": now_iso(),
+                "reason": reason,
+                "jsonl_path": str(jsonl_path),
+                "model": model_id,
+                "prompt_id": prompt_id,
+                "asr_correct": asr_correct,
+                "min_quality": AUTO_LLM_MIN_QUALITY,
+            }
+            try:
+                AUTO_LLM_Q.put_nowait(job)
+            except asyncio.QueueFull:
+                log(f"[AUTO_LLM_Q] DROP (queue full) jsonl={jsonl_path.name} prompt={prompt_id}")
+        except Exception as e:
+            log(f"[AUTO_LLM_Q] enqueue error: {e}")
 # -------------------------
 # ASR config (defaults from config.json)
 # -------------------------
@@ -815,6 +1071,14 @@ async def dyna_watch_task():
 
             if pid:
                 if CURRENT["patient_id"] != pid:
+                    # 切替前セッションを自動LLMに投げる
+                    try:
+                        prev_jsonl = CURRENT.get("jsonl_path")
+                        if prev_jsonl:
+                            enqueue_auto_llm_for_session(Path(prev_jsonl))
+                    except Exception as e:
+                        log(f"[AUTO_LLM] enqueue failed: {e}")
+
                     new_session(pid)
                     log(f"[SESSION] switched patient_id={pid} txt={CURRENT['text_path']}")
 
@@ -860,6 +1124,11 @@ async def index():
 @app.on_event("startup")
 async def _startup():
     asyncio.create_task(dyna_watch_task())
+
+    # Auto LLM worker（逐次キュー処理）
+    asyncio.create_task(_auto_llm_worker())
+
+    cleanup_expired_wavs(CFG)
     log("[APP] startup complete")
 
 # -------------------------
@@ -1376,7 +1645,59 @@ class State:
             CURRENT["jsonl_path"]
         )
 
+        cleanup_expired_wavs(CFG)
         return seg
+
+# ==========================================
+# WAV Auto Cleanup
+# ==========================================
+
+_last_wav_cleanup = None
+
+def cleanup_expired_wavs(cfg: dict):
+    """
+    cfg["wav_expire_days"]:
+        0 -> 削除しない
+        N -> N日より古いwavを削除
+    """
+    global _last_wav_cleanup
+
+    expire_days = cfg.get("wav_expire_days",0)  
+
+    if not expire_days or int(expire_days) <= 0:
+        return
+
+    now = datetime.datetime.now()
+
+    # 1時間に1回だけ実行（負荷軽減）
+    if _last_wav_cleanup and (now - _last_wav_cleanup).seconds < 3600:
+        return
+
+    wav_dir = cfg.get("wav_dir", "data/wav")
+    cutoff = now - datetime.timedelta(days=int(expire_days))
+
+    if not os.path.isdir(wav_dir):
+        return
+
+    deleted = 0
+    for fname in os.listdir(wav_dir):
+        if not fname.lower().endswith(".wav"):
+            continue
+
+        fpath = os.path.join(wav_dir, fname)
+
+        try:
+            mtime = datetime.datetime.fromtimestamp(os.path.getmtime(fpath))
+            if mtime < cutoff:
+                os.remove(fpath)
+                deleted += 1
+        except Exception:
+            pass
+
+    if deleted > 0:
+        print(f"[WAV CLEANUP] deleted {deleted} expired files")
+
+    _last_wav_cleanup = now
 
 # -------------------------
 # ASR worker
@@ -1599,6 +1920,14 @@ async def ws_endpoint(ws: WebSocket):
     except WebSocketDisconnect:
         log("[WS] close")
     finally:
+        # ★追加：最後の患者は patient_changed が起きないので、録音停止で auto_llm
+        try:
+            cur_jsonl = CURRENT.get("jsonl_path")
+            if cur_jsonl:
+                enqueue_auto_llm_for_session(Path(cur_jsonl))
+        except Exception as e:
+            log(f"[AUTO_LLM] enqueue on stop failed: {e}")
+
         CLIENTS.pop(ws, None)
         if st.asr_task:
             st.asr_task.cancel()

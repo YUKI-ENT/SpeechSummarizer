@@ -9,6 +9,7 @@
   "wav_dir": "data/wav",
   "llm_outputs_dir": "data/llm",
   "correction_rules_path": "./corrections.json",
+  "wav_expire_days": 7,
 
   "port": 8000,
 
@@ -62,5 +63,14 @@
         "template": "以下は診察会話で主に医者の発言部分のテキストですが、音声認識のため変換ミスが見られます。「咳」→「席」、「鼻」→「花」など文脈から間違いと思われるものを修正し、質問に対する返答の「うん」「はい」「ええ」等は必ず残し、言ってもないことを追加することなく出力してください。【会話テキスト】\n{asr_text}\n"
       }
     }
-  }
+  },
+
+  "auto_llm": true,
+  "auto_llm_prompts": [
+    {
+      "model_id": "gpt-oss:20b",
+      "prompt_id": "soap_v1",
+      "asr_correct": true
+    }
+  ]
 }
