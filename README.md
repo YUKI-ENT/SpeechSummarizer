@@ -28,7 +28,7 @@ SpeechSummarizer は、医療現場向けに設計されたリアルタイム音
 SpeechSummarizer/
 ├─ SpeechSummarizer.exe
 ├─ _internal/
-├─ config.json
+├─ config.json.sample
 ├─ correct.json
 ├─ static/
 ├─ cert/
@@ -53,7 +53,7 @@ pip install -r requirements.txt
 ```
 
 ## config.jsonの設定
-インストールフォルダに有るconfig.jsonを環境に合わせて編集します。
+インストールフォルダに有る`config.json.sample`を`config.json`に名前を変えるかコピーし、環境に合わせて編集します。
 
 必須の項目は、
 - \"asr\": セクション
