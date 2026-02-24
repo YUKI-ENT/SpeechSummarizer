@@ -38,6 +38,11 @@ import hashlib
 [3] 既存の ASR→jsonl、LLM→jsonl good以上抽出の流れは維持
     - LLM問い合わせは jsonl から min_quality 以上のみ送信（現状通り）
 """
+# -------------------------
+# App version (server software version)
+# -------------------------
+# ここを書き換えるだけでUI表示が変わる（config.json には置かない）
+APP_VERSION = "20260224"
 
 # -------------------------
 # Config
@@ -1120,6 +1125,10 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 @app.get("/")
 async def index():
     return FileResponse(str(STATIC_DIR / "index.html"))
+
+@app.get("/api/version")
+async def api_version():
+    return {"ok": True, "version": APP_VERSION}
 
 @app.on_event("startup")
 async def _startup():

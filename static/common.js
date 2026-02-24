@@ -1,5 +1,7 @@
 (() => {
   // ===== DOM =====
+  const appVersionEl = document.getElementById("appVersion");
+
   const logEl = document.getElementById('log');
   const levelEl = document.getElementById('level');
   const btnStart = document.getElementById('btnStart');
@@ -125,6 +127,21 @@
   }
 
   // ===== API loaders =====
+  async function loadAppVersion(){
+    if (!appVersionEl) return;
+    try{
+      const r = await fetch('/api/version');
+      const j = await r.json();
+      if (j && j.ok && typeof j.version === 'string'){
+        appVersionEl.textContent = j.version;
+      }else{
+        appVersionEl.textContent = '-';
+      }
+    }catch(e){
+      appVersionEl.textContent = '-';
+    }
+  }
+
   async function loadAsrModels(){
     if (!selAsrModel) return;
     try{
@@ -217,8 +234,7 @@
     return (selSession?.value || '').trim();
   }
 
-
-  async function loadLlmHistory(){
+  async function loadLlmHistory(opts={}){
     if (!selSoapHistory) return;
     const session = getSessionForLlm();
     if (!session){
@@ -246,6 +262,17 @@
       });
 
       safeSelectValue(selSoapHistory, cur);
+
+      // セッション切替直後など、履歴があり、かつ何も選ばれていない場合は最新を自動表示
+      const wantLatest = !!opts.autoShowLatest;
+      const items = (j.items || []);
+      if (wantLatest && (!selSoapHistory.value) && items.length){
+        const latestId = items[0].id;
+        if (latestId){
+          selSoapHistory.value = latestId;
+          await loadLlmHistoryItem(latestId);
+        }
+      }
     }catch(e){
       log(`[ui] loadLlmHistory failed: ${e}`);
     }
@@ -307,7 +334,7 @@
       }
       clearSummary();
       setAsrModelNameFromMeta(data.meta || null);
-      await loadLlmHistory();
+      await loadLlmHistory({autoShowLatest:true});
       log(`[session] loaded ${name}`);
     }catch(e){
       log('[session] ERROR: ' + e);
@@ -435,7 +462,7 @@
       summaryEl.scrollTop = 0;
       log(`[llm] SOAP done model=${j.model || '?'} elapsed=${j.elapsed_sec}s saved=${j.saved_name || 'n/a'}`);
 
-      await loadLlmHistory();
+      await loadLlmHistory({autoShowLatest:true});
     }catch(e){
       log(`[llm] SOAP failed: ${e}`);
     }finally{
@@ -509,7 +536,7 @@
           else if (msg.asr_model && asrModelNameEl) asrModelNameEl.textContent = msg.asr_model;
 
           log('[status] ' + msg.msg + (msg.session_txt ? ' session=' + msg.session_txt : ''));
-          loadLlmHistory();
+          loadLlmHistory({autoShowLatest:true});
         }
 
         if (msg.type === 'patient_changed') {
@@ -519,7 +546,7 @@
           clearTranscript();
           clearSummary();
           log('[patient_changed] ' + (msg.patient_id || '(未設定)') + (msg.session_txt ? ' session=' + msg.session_txt : ''));
-          loadLlmHistory();
+          loadLlmHistory({autoShowLatest:true});
         }
 
         if (msg.type === 'saved') {
@@ -688,6 +715,7 @@
 
   // ===== init =====
   // setWsStatus(false);
+  loadAppVersion();
   refreshSessions();
   loadAsrModels();
   loadLlmModels();
