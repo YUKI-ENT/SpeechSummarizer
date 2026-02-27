@@ -15,8 +15,8 @@
 
   "ssl": {
     "enabled": true,
-    "certfile": "certs/cert.pem",
-    "keyfile": "certs/key.pem"
+    "certfile": "certs/ai-server.crt",
+    "keyfile": "certs/ai-server.key"
   },
 
   "asr": {
@@ -43,7 +43,7 @@
 
   "llm": {
     "host": "http://127.0.0.1:11434",
-    "model_default": "gpt-oss:20b",
+    "model_default": "qwen3-swallow-8brl:latest",
     "timeout": 120,
     "temperature": 0.0,
     "top_p": 0.9,
@@ -68,7 +68,7 @@
   "auto_llm": true,
   "auto_llm_prompts": [
     {
-      "model_id": "gpt-oss:20b",
+      "model_id": "qwen3-swallow-8brl:latest",
       "prompt_id": "soap_v1",
       "asr_correct": true
     }

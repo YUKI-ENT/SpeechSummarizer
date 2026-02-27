@@ -42,7 +42,7 @@ import hashlib
 # App version (server software version)
 # -------------------------
 # ここを書き換えるだけでUI表示が変わる（config.json には置かない）
-APP_VERSION = "20260224"
+APP_VERSION = "20260227"
 
 # -------------------------
 # Config

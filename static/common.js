@@ -448,6 +448,13 @@
         return;
       }
 
+      // ★追加：送信した瞬間にUIをリセット（結果が届くまでの見た目を明確にする）
+      clearSummary(); // summaryEl.value = ''
+      if (selSoapHistory){
+        selSoapHistory.innerHTML = '<option value="">履歴…</option>';
+        selSoapHistory.value = '';
+      }
+
       log(`[llm] SOAP start (${session}) model=${model || '(default)'} prompt=${prompt_id}`);
 
       const r = await fetch('/api/llm/soap', {
@@ -458,10 +465,12 @@
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || String(r.status));
 
+      // 結果が届いたら表示
       summaryEl.value = j.summary || '';
       summaryEl.scrollTop = 0;
       log(`[llm] SOAP done model=${j.model || '?'} elapsed=${j.elapsed_sec}s saved=${j.saved_name || 'n/a'}`);
 
+      // 履歴一覧も復帰（最新を自動表示）
       await loadLlmHistory({autoShowLatest:true});
     }catch(e){
       log(`[llm] SOAP failed: ${e}`);

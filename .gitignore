@@ -28,4 +28,10 @@ models/
 # secrets
 .env
 
+*.csr
+*.crt
+*.key
+*.srl
+myCA.pem
+
 .code-workspace
