@@ -1,9 +1,9 @@
 # tools/build_windows.ps1
 # Windows 用: venv作成 → 依存導入 → PyInstaller(onedir) → VC++ DLL削除 → zip作成
 # 使い方:
-#   powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1
+#   .\tools\build_windows.ps1
 # models を同梱しないなら：
-#   powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1  -IncludeModels:$false
+#   .\tools\build_windows.ps1  -IncludeModels $false
 # オプション:
 #   -PythonExe "py" -PythonVersion "3.12" -Clean -NoZip
 
@@ -13,7 +13,7 @@ param(
   [string]$DistDir = "dist",
   [string]$BuildDir = "build",
   [string]$OutDir = "release",
-  [switch]$IncludeModels = $true   # models/を同梱しないなら -IncludeModels:$false
+  [bool]$IncludeModels = $true   # models/を同梱しないなら -IncludeModels:$false
 )
 
 $ErrorActionPreference = "Stop"
@@ -52,18 +52,49 @@ try {
   $AppDir = Join-Path $DistDir $Name
   Assert-Exists $AppDir
 
+  # --- VC++ Runtime DLL削除（衝突回避） ---
+  $internalDir = Join-Path $AppDir "_internal"
+
+  if (Test-Path $internalDir) {
+    $vcDlls = @(
+      "msvcp140.dll",
+      "MSVCP140_1.dll",
+      "vcruntime140.dll",
+      "vcruntime140_1.dll",
+      "concrt140.dll"
+    )
+
+    foreach ($dll in $vcDlls) {
+      $target = Join-Path $internalDir $dll
+      if (Test-Path $target) {
+        Remove-Item $target -Force
+        Write-Host "[fix] removed VC runtime DLL: $dll"
+      }
+    }
+  }
+
   # --- 配布用ファイルを exe と同階層にコピー ---
   # ここが今回の修正ポイント
   Write-Host "[pack] Copy assets into $AppDir"
 
   $itemsToCopy = @(
-    "config.json",
+    "config.json.sample",
     "corrections.json",
     "static",
     "certs"
   )
 
   if ($IncludeModels) { $itemsToCopy += "models" }
+
+  # config.json.sample → config.json としてコピー
+  Remove-Item (Join-Path $AppDir "config.json") -ErrorAction SilentlyContinue
+
+  # if (Test-Path "config.json.sample") {
+  #   Copy-Item "config.json.sample" -Destination (Join-Path $AppDir "config.json") -Force
+  #   Write-Host "[pack] copied: config.json.sample -> config.json"
+  # } else {
+  #   Write-Host "[pack] skip (config.json.sample not found)"
+  # }
 
   foreach ($it in $itemsToCopy) {
     if (Test-Path $it) {

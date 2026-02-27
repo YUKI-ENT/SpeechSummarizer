@@ -11,6 +11,7 @@ import sys
 from pathlib import Path
 from urllib.parse import unquote
 import re
+import shutil
 from typing import Any, Dict, List, Optional
 
 import numpy as np
@@ -56,6 +57,7 @@ def get_app_dir() -> Path:
 
 APP_DIR = get_app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
+CONFIG_SAMPLE_PATH = APP_DIR / "config.json.sample"
 
 _CONFIG_CACHE: Optional[dict] = None
 
@@ -66,7 +68,16 @@ def load_config(force_reload: bool = False) -> dict:
         return _CONFIG_CACHE
 
     if not CONFIG_PATH.exists():
-        raise FileNotFoundError(f"config.json not found: {CONFIG_PATH}")
+        # 初回起動: config.json が無ければ sample から生成（既存を上書きしない）
+        if CONFIG_SAMPLE_PATH.exists():
+            try:
+                shutil.copyfile(CONFIG_SAMPLE_PATH, CONFIG_PATH)
+            except Exception as e:
+                raise RuntimeError(f"failed to copy config.json.sample -> config.json: {e}")
+        else:
+            raise FileNotFoundError(
+                f"config.json not found: {CONFIG_PATH} (and sample not found: {CONFIG_SAMPLE_PATH})"
+            )
 
     with CONFIG_PATH.open("r", encoding="utf-8") as f:
         cfg = json.load(f)
