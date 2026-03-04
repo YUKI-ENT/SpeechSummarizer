@@ -43,7 +43,7 @@ import hashlib
 # App version (server software version)
 # -------------------------
 # ここを書き換えるだけでUI表示が変わる（config.json には置かない）
-APP_VERSION = "20260227"
+APP_VERSION = "20260303"
 
 # -------------------------
 # Config
@@ -369,6 +369,31 @@ def new_session(patient_id: str):
         CURRENT["jsonl_path"]
     )
 
+def _today_yyyymmdd() -> str:
+    return datetime.datetime.now().strftime("%Y%m%d")
+
+def find_latest_session_txt_for_patient_today(patient_id: str) -> str | None:
+    """
+    outputs_dir から「同一患者・同一日」の最新セッション(txt)を探す。
+    例: 123456_20260303_101010.txt のような命名を前提。
+    """
+    ymd = _today_yyyymmdd()
+    pat = f"{patient_id}_{ymd}_*.txt"
+    files = sorted(OUTPUTS_DIR.glob(pat), key=lambda p: p.stat().st_mtime, reverse=True)
+    return files[0].name if files else None
+
+def append_resume_marker(*, txt_path: str, jsonl_path: str, patient_id: str, stamp: str):
+    ts = datetime.datetime.now()
+    line = f"==== {ts.strftime('%Y/%m/%d %H:%M:%S')} 再開 ===="
+    append_text_line(txt_path, line)
+    append_jsonl({
+        "type": "resume",
+        "ts": now_iso(),
+        "patient_id": patient_id,
+        "stamp": stamp,
+        "text": line,   # JSONLは1行化されるので安全 :contentReference[oaicite:7]{index=7}
+    }, jsonl_path)
+
 def append_asr_config_event(reason: str):
     try:
         if CURRENT.get("jsonl_path"):
@@ -412,21 +437,34 @@ def _session_from_jsonl_name(path: Path) -> Dict[str, str]:
         return {"patient_id": CURRENT.get("patient_id") or "unknown", "stamp": CURRENT.get("session_stamp") or ""}
     return {"patient_id": m.group("pid"), "stamp": m.group("stamp")}
 
-def ollama_generate_text(*, host: str, model: str, prompt: str, timeout_sec: float, temperature: float, top_p: float) -> Dict[str, Any]:
+def ollama_generate_text(*, host: str, model: str, prompt: str,
+                         timeout_sec: float, temperature: float, top_p: float) -> Dict[str, Any]:
     url = host.rstrip("/") + "/api/generate"
     payload = {
         "model": model,
         "prompt": prompt,
         "stream": False,
-        "options": {
-            "temperature": temperature,
-            "top_p": top_p,
-        },
+        "think": False,  # ★まずOFF
+        "options": {"temperature": temperature, "top_p": top_p},
     }
+
     with httpx.Client(timeout=timeout_sec) as client:
         r = client.post(url, json=payload)
+        body_len = len(r.content or b"")
+        log(f"[LLM] status={r.status_code} body_bytes={body_len}")
         r.raise_for_status()
-        return r.json()
+        j = r.json()
+
+    # ★ここが肝
+    resp_len = len((j.get("response") or ""))
+    think_len = len((j.get("thinking") or ""))
+    ctx_len = len((j.get("context") or []))
+    log(f"[LLM] keys={list(j.keys())} response_len={resp_len} thinking_len={think_len} context_len={ctx_len}")
+
+    # 返す前に捨てる（安全）
+    j.pop("context", None)
+    j.pop("thinking", None)
+    return j
 
 def list_ollama_models(host: str, *, timeout_sec: float) -> List[str]:
     url = host.rstrip("/") + "/api/tags"
@@ -1095,15 +1133,50 @@ async def dyna_watch_task():
                     except Exception as e:
                         log(f"[AUTO_LLM] enqueue failed: {e}")
 
-                    new_session(pid)
-                    log(f"[SESSION] switched patient_id={pid} txt={CURRENT['text_path']}")
+                    # -------------------------
+                    # ここからが「同一日・同一患者なら復帰」の追加部分
+                    # -------------------------
+                    resumed = False
+
+                    # 今日の同一患者の最新セッション(txt)があれば、それを再利用
+                    today_txt = find_latest_session_txt_for_patient_today(pid)  # 例: "123_20260303_101010.txt"
+                    if today_txt:
+                        info = _parse_session_name(today_txt)
+                        if info:
+                            _pid, _stamp = info
+                            txt_path = (OUTPUTS_DIR / today_txt).resolve()
+                            jsonl_path = (OUTPUTS_DIR / today_txt.replace(".txt", ".jsonl")).resolve()
+
+                            # jsonl も存在する時だけ復帰（安全側）
+                            if txt_path.exists() and jsonl_path.exists():
+                                CURRENT["patient_id"] = _pid
+                                CURRENT["session_stamp"] = _stamp
+                                CURRENT["text_path"] = str(txt_path)
+                                CURRENT["jsonl_path"] = str(jsonl_path)
+
+                                # txtに見える区切り + jsonlに type=resume を追記（LLM本文には混ざらない）
+                                append_resume_marker(
+                                    txt_path=CURRENT["text_path"],
+                                    jsonl_path=CURRENT["jsonl_path"],
+                                    patient_id=_pid,
+                                    stamp=_stamp
+                                )
+
+                                resumed = True
+
+                    if not resumed:
+                        # 今日初回 or 既存セッションが見つからない/壊れている → 従来通り新規
+                        new_session(pid)
+
+                    log(f"[SESSION] {'resumed' if resumed else 'switched'} patient_id={pid} txt={CURRENT['text_path']}")
 
                     await broadcast({
                         "type": "patient_changed",
                         "patient_id": pid,
                         "text_path": CURRENT["text_path"],
                         "jsonl_path": CURRENT["jsonl_path"],
-                        "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else "")
+                        "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
+                        "resumed": resumed,  # UIで使わないなら消してOK
                     }, reset_states=True)
 
             await asyncio.sleep(0.5)
@@ -1217,6 +1290,23 @@ async def api_llm_history_item(item_id: str):
     txt = p.read_text(encoding="utf-8", errors="replace")
     return {"ok": True, "summary": txt}
 
+_THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+
+def strip_thinking_from_response(text: str) -> str:
+    if not text:
+        return ""
+    # まず <think>…</think> のブロックがあれば除去
+    text2 = _THINK_BLOCK_RE.sub("", text).lstrip()
+
+    # それでも「手順」っぽい前置きが残る場合の保険：
+    # SOAPの開始位置を探してそこから採用（**S** や "S:" を想定）
+    for marker in ["**S**", "S\n", "S:", "【S】", "＜S＞"]:
+        idx = text2.find(marker)
+        if idx != -1:
+            return text2[idx:].strip()
+
+    return text2.strip()
+
 @app.post("/api/llm/soap")
 async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
     MAX_ASR_TEXT_CHARS = 50000
@@ -1275,7 +1365,9 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
             temperature=temperature,
             top_p=top_p,
         )
-        summary = (raw.get("response") or "").strip()
+        summary = (raw.get("response") or "")
+        summary = strip_thinking_from_response(summary)
+        summary = summary.strip()
         elapsed = round(time.time() - t0, 3)
 
         saved_id = save_llm_summary(jsonl_path=jsonl_path, model=model, prompt_id=prompt_id, summary=summary)
@@ -1401,6 +1493,16 @@ def api_session_get(name: str):
 
     return {"name": name, "patient_id": patient_id, "stamp": stamp, "text": text, "meta": meta}
 
+RESUME_MARK_RE = re.compile(r"^====\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+再開\s*====\s*$")
+
+def strip_resume_markers(text: str) -> str:
+    out = []
+    for line in (text or "").splitlines():
+        if RESUME_MARK_RE.match(line.strip()):
+            continue
+        out.append(line)
+    return "\n".join(out).strip() + ("\n" if out else "")
+
 @app.post("/api/correct/apply")
 async def api_correct_apply(payload: Dict[str, Any] = Body(...)):
     """
@@ -1440,6 +1542,7 @@ async def api_correct_apply(payload: Dict[str, Any] = Body(...)):
 
     rules = load_correction_rules()
     before_text = txt_path.read_text(encoding="utf-8", errors="replace")
+    before_text = strip_resume_markers(before_text) 
 
     after_text, stats = apply_corrections(before_text, rules)
 
@@ -1522,6 +1625,13 @@ async def api_session_rebuild(payload: Dict[str, Any] = Body(...)):
                 except Exception:
                     continue
                 if rec.get("type") == "asr":
+                    t = rec.get("text")
+                    if isinstance(t, str):
+                        t = t.strip()
+                        if t:
+                            parts.append(t)
+
+                elif rec.get("type") == "resume":
                     t = rec.get("text")
                     if isinstance(t, str):
                         t = t.strip()
