@@ -19,7 +19,7 @@
   const hearingOverlay = document.getElementById('hearingOverlay');
   const hearingTextEl = document.getElementById('hearingText');
   const btnHearingToggle = document.getElementById('btnHearingToggle');
-  const btnHearingClose  = document.getElementById('btnHearingClose');
+  const btnHearingClose = document.getElementById('btnHearingClose');
 
   const patientInputEl = document.getElementById('patientInput');
   const patientRecentListEl = document.getElementById('patientRecentList');
@@ -717,7 +717,7 @@
   function appendLiveAsr(text) {
     if (!text) return;
     liveAsrText += (liveAsrText ? '\n' : '') + text;
-    updateHearingText(text); // 難聴モードは最新のセグメントのみ
+    updateHearingText(liveAsrText);
 
     // 現在セッションカードのASR欄を更新
     if (currentSessionTxt && karteTimeline) {
@@ -793,6 +793,14 @@
   // ===== 録音: WS接続は使い回し、音声キャプチャのみ開始 =====
   async function startRecording() {
     try {
+      let targetPid = (patientInputEl?.value || '').trim();
+      if (!targetPid) {
+        targetPid = currentPatientId || 'unknown';
+      }
+      if (targetPid !== currentPatientId || !currentSessionTxt) {
+        await switchPatientById(targetPid);
+      }
+
       if (!navigator.mediaDevices?.getUserMedia) {
         log('ERROR: getUserMedia unavailable.');
         return;
@@ -839,7 +847,18 @@
       isRecording = true;
       renderRecState();
       if (selAsrModel) selAsrModel.disabled = true;
-      resetLiveAsr();
+
+      let existingAsr = '';
+      if (currentSessionTxt) {
+        try {
+          const r = await fetch('/api/session/' + encodeURIComponent(currentSessionTxt));
+          const j = await r.json();
+          if (j.text) existingAsr = j.text.trim();
+        } catch (e) { }
+      }
+      liveAsrText = existingAsr;
+      updateHearingText(liveAsrText || '(音声認識待機中)');
+
       log('recording start');
     } catch (e) {
       log('ERROR: ' + e);

@@ -353,6 +353,9 @@ def new_session(patient_id: str):
     CURRENT["jsonl_path"] = str(js)
     CURRENT["full_text"] = ""
 
+    # ★ Create the empty txt file so the frontend list_sessions can find it immediately
+    txt.touch(exist_ok=True)
+
     session_meta = {
         "asr": dict(CURRENT.get("asr", {})),
         "dict": dict(CURRENT.get("dict", {})),
