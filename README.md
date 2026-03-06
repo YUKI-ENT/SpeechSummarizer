@@ -52,6 +52,8 @@ source venv/bin/activate （Linux）
 pip install -r requirements.txt
 ```
 
+※ Linux環境では、CUDAランタイムをシステムにインストールするとドライババージョンや他のアプリケーションと干渉し起動できなくなることがあるので、下記の[【補足】GPU (CUDA) 利用方法（Linux）](https://github.com/YUKI-ENT/SpeechSummarizer/edit/main/README.md#%E8%A3%9C%E8%B6%B3gpu-cuda-%E5%88%A9%E7%94%A8%E6%96%B9%E6%B3%95linux) を推奨します。
+
 ## config.jsonの設定
 インストールフォルダに有る`config.json.sample`を`config.json`に名前を変えるかコピーし、環境に合わせて編集します。
 
@@ -151,7 +153,7 @@ pip install -r requirements.txt
   python app.py
   ```
   
-  ※Linux環境では、システムにCUDAランタイムを入れるとドライバのバージョンアップに伴い動作不良を起こすことがあるので、下の **GPU (CUDA) 利用方法（Linux） ** の章を参考に、venv内にCUDAランタイムを入れて、`SpeechSummarizer.sh`で起動するようにしてください。
+  ※Linux環境では、システムにCUDAランタイムを入れるとドライバのバージョンアップに伴い動作不良を起こすことがあるので、下の **【補足】GPU (CUDA) 利用方法（Linux)** の章を参考に、venv内にCUDAランタイムを入れて、`SpeechSummarizer.sh`で起動するようにしてください。
 
 ## 利用方法
 - クライアントからローカルの場合は
@@ -167,14 +169,69 @@ pip install -r requirements.txt
   ![スクリーンショット 2026-02-18 120922](https://github.com/user-attachments/assets/f72fad23-cc97-4266-aaa9-fa281dba0e8f)
 
 
-## GPU (CUDA) 利用方法（Linux）
+# 【補足】GPU (CUDA) 利用方法（Linux）  
+  
+SpeechSummarizer は GPU を使用した高速音声認識（faster-whisper）に対応しています。  
+  
+Linux では **NVIDIAドライバだけではGPU認識は動作しません**。  
+CUDA / cuBLAS / cuDNN のランタイムが必要です。  
+  
+本プロジェクトでは **CUDAをシステムではなく Python 仮想環境（venv）にインストールする方式**を採用しています。  
+  
+## この方式のメリット  
+  
+- システム全体の CUDA を汚さない  
+- 他のソフトと CUDA バージョンが衝突しない  
+- プロジェクト単位で GPU 環境を再現できる  
+  
+---  
+  
+# 1. NVIDIA Driver の確認  
+  
+まず GPU ドライバが動いていることを確認します。  
+  
+```bash  
+nvidia-smi
+```
+GPU が表示されれば OK です。
 
-SpeechSummarizer は GPU を使用した高速 ASR (faster-whisper) に対応しています。
-Linux 環境では NVIDIA ドライバだけでは動作せず、CUDA ランタイムと cuDNN が必要です。
+----------
 
-この章では以下を説明します。
-- GPU ASR の前提条件
-- NVIDIA driver の導入
-- CUDA / cuBLAS / cuDNN の導入
-- 起動方法
-- トラブルシューティング
+# 2. CUDA ランタイムをインストール
+
+仮想環境を有効化します。
+```
+source .venv/bin/activate
+```
+CUDA runtime / cuBLAS / cuDNN をインストールします。
+```
+pip install \  
+ nvidia-cuda-runtime-cu12 \  
+ nvidia-cublas-cu12 \  
+ nvidia-cudnn-cu12
+```
+
+# 3. アプリ起動
+
+アプリケーション起動用のスクリプトを用意していますので、Linux環境では
+```
+./SpeechSummarizer.sh
+```
+で起動します。
+
+正常に動作するとログに
+```
+[ASR] loading model ... device=cuda
+```
+と表示されます。
+
+----------
+
+
+# CPU モード
+
+GPU が無い環境では`config.json`の設定で
+```
+device=cpu
+```
+にすると CPU で動作します。
