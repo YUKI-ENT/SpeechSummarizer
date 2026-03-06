@@ -150,6 +150,8 @@ pip install -r requirements.txt
   ```
   python app.py
   ```
+  
+  ※Linux環境では、システムにCUDAランタイムを入れるとドライバのバージョンアップに伴い動作不良を起こすことがあるので、下の **GPU (CUDA) 利用方法（Linux） ** の章を参考に、venv内にCUDAランタイムを入れて、`SpeechSummarizer.sh`で起動するようにしてください。
 
 ## 利用方法
 - クライアントからローカルの場合は
@@ -163,3 +165,16 @@ pip install -r requirements.txt
   で画面が立ち上がります。
 
   ![スクリーンショット 2026-02-18 120922](https://github.com/user-attachments/assets/f72fad23-cc97-4266-aaa9-fa281dba0e8f)
+
+
+## GPU (CUDA) 利用方法（Linux）
+
+SpeechSummarizer は GPU を使用した高速 ASR (faster-whisper) に対応しています。
+Linux 環境では NVIDIA ドライバだけでは動作せず、CUDA ランタイムと cuDNN が必要です。
+
+この章では以下を説明します。
+- GPU ASR の前提条件
+- NVIDIA driver の導入
+- CUDA / cuBLAS / cuDNN の導入
+- 起動方法
+- トラブルシューティング

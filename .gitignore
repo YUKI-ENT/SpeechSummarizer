@@ -35,3 +35,4 @@ models/
 myCA.pem
 
 .code-workspace
+.vscode/
