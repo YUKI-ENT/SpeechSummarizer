@@ -1,5 +1,6 @@
 <!doctype html>
 <html lang="ja">
+
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
@@ -9,112 +10,172 @@
 </head>
 
 <body>
+
   <!-- Top Nav -->
   <div class="nav">
+
     <div class="brand">
       <div class="title">SpeechSummarizer</div>
       <div class="sub">ver<span id="appVersion">-</span></div>
     </div>
 
+    <!-- カルテNo -->
     <div class="nav-center">
-      <!-- <div class="pill"><span class="dot" id="dotWs"></span><span id="wsStatus">disconnected</span></div> -->
-      
-      <!-- <div class="pill">カルテ: <span id="patientIdNav">(未設定)</span></div> -->
+      <div class="patient-input-group">
+        <span class="nav-label">カルテNo:</span>
+        <input
+          type="text"
+          id="patientInput"
+          class="patient-input"
+          list="patientRecentList"
+          placeholder="カルテNoを入力 / 選択"
+          autocomplete="off"
+        >
+        <datalist id="patientRecentList"></datalist>
+        <button id="btnSwitchPatient" class="btn btn-sm" type="button">表示</button>
+      </div>
     </div>
 
     <div class="nav-right">
+
       <div class="pill">level: <span id="level">-</span> dBFS</div>
-      <select id="selAsrModel" class="btn" style="padding:10px 12px; min-width: 140px;">
+
+      <select id="selAsrModel" class="btn" style="padding:10px 12px; min-width:140px;">
         <option value="">ASR model...</option>
       </select>
+
+      <!-- 録音ボタン -->
       <button id="btnRec" class="btn btn-rec" title="録音開始 / 停止">
         <svg class="mic-icon" viewBox="0 0 24 24">
-          <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a1 1 0 1 0-2 0 3 3 0 0 1-6 0 1 1 0 1 0-2 0 5 5 0 0 0 4 4.9V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.1A5 5 0 0 0 17 12z"/>
+          <path
+            d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a1 1 0 1 0-2 0 3 3 0 0 1-6 0 1 1 0 1 0-2 0 5 5 0 0 0 4 4.9V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.1A5 5 0 0 0 17 12z" />
         </svg>
       </button>
 
-      <button class="btn btn-primary" id="btnStart" style="display:none">Start</button>
-      <button class="btn btn-danger" id="btnStop" style="display:none">Stop</button>
+      <!-- ログ -->
+      <button class="btn btn-icon"
+              id="btnToggleLog"
+              aria-pressed="false"
+              title="ログ表示">
 
-      <button class="btn" id="btnToggleLog" aria-pressed="false" title="ログ表示/非表示">
-        ログ
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <rect x="4" y="3" width="16" height="18" rx="2"
+                stroke="currentColor"
+                stroke-width="2"
+                fill="none"/>
+          <path d="M8 7h8M8 11h8M8 15h6"
+                stroke="currentColor"
+                stroke-width="2"
+                stroke-linecap="round"/>
+        </svg>
       </button>
 
-      <label class="toggle" title="患者さんに見せる字幕を巨大化します">
-        <input type="checkbox" id="chkHearing">
-        難聴
-      </label>
+      <!-- 難聴モード -->
+      <button class="btn btn-icon"
+              id="btnHearingToggle"
+              aria-pressed="false"
+              title="字幕（難聴）モード">
+
+        <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
+          <path d="M4 9v6h4l5 4V5L8 9H4z"
+                fill="currentColor"/>
+          <path d="M16 9a3 3 0 0 1 0 6"
+                stroke="currentColor"
+                stroke-width="2"
+                fill="none"
+                stroke-linecap="round"/>
+          <path d="M18 7a6 6 0 0 1 0 10"
+                stroke="currentColor"
+                stroke-width="2"
+                fill="none"
+                stroke-linecap="round"/>
+        </svg>
+      </button>    
     </div>
   </div>
 
-  <!-- Main -->
-  <div class="grid">
-    <!-- Left: patient + transcript -->
-    <div class="card patient-card">
+
+  <!-- 難聴モード字幕 -->
+  <div id="hearingOverlay" class="hearing-overlay">
+
+    <button
+      id="btnHearingClose"
+      class="btn hearing-close"
+      type="button"
+      title="難聴モードを終了"
+    >
+      終了
+    </button>
+
+    <textarea
+      id="hearingText"
+      class="hearing-text"
+      spellcheck="false"
+      autocomplete="off"
+      autocapitalize="off"
+      rows="6"
+    ></textarea>
+
+  </div>
+
+  <!-- Layout -->
+  <div class="main-layout">
+
+    <!-- 左: 受診履歴 -->
+    <div class="sidebar card" id="sidebar">
       <div class="hd">
-        <h3>ASR情報</h3>
+        <h3>受診履歴</h3>
+        <span class="muted2 sidebar-pid" id="sidebarPid">-</span>
       </div>
-      <div class="bd">
-        <div class="meta-row">
-          <span class="meta-item">ID: <b id="patientId">(未設定)</b></span>
-          <span class="meta-sep">/</span>
-          <span class="meta-item">ASR: <b id="asrModelName">(未設定)</b></span>
-          <select id="selSession" class="select" title="過去の認識結果">
-            <option value="">認識履歴</option>
-          </select>
+
+      <div class="bd sidebar-body" id="sidebarList">
+        <div class="muted2 sidebar-empty">
+          カルテNoを入力してください
         </div>
       </div>
+    </div>
 
-      <!-- 認識＆要約：2列レイアウト -->
-      <div class="bd split-2col">
-        <section class="pane">
-          <div class="pane-hd">
-            <h3>認識テキスト</h3>
-            <div class="pane-tools">
-              <button class="btn btn-sm" id="btnCorrectAsr" title="認識テキストをルールで補正">補正</button>
-              <button class="btn btn-sm" id="btnRebuild" title="JSONL原本から .txt を再生成して戻す">元に戻す</button>
-              <button class="btn btn-sm" id="btnCopyAsr" title="音声認識結果をコピー">Copy</button>
-            </div>
-          </div>
-          <textarea id="transcript" class="transcript" spellcheck="false"></textarea>
-        </section>
 
-        <section class="pane">
-          <div class="pane-hd">
-            <h3>AI処理</h3>
-            <div class="pane-tools">
-              <select id="selLlmModel" class="select select-sm" title="LLMモデル">
-                <option value="">LLM model...</option>
-              </select>
-              <select id="selSoapPrompt" class="select select-sm" title="プロンプト">
-                <option value="">Prompt...</option>
-              </select>
-              <button class="btn btn-primary btn-sm" id="btnSoap" title="Ollamaで処理">送信</button>
+    <!-- 中央: カルテ -->
+    <div class="timeline-area">
 
-              <select id="selSoapHistory" class="select select-sm" title="過去要約一覧">
-                <option value="">履歴…</option>
-              </select>
-              <button class="btn btn-sm" id="btnCopySoap" title="AI処理結果をコピー">Copy</button>
-            </div>
-          </div>
-          <textarea id="summary" class="summary" spellcheck="false" placeholder="AI処理結果"></textarea>
-        </section>
+      <div id="karteTimeline" class="karte-timeline">
+        <div class="karte-empty muted2">
+          カルテNoを入力または録音を開始してください
+        </div>
       </div>
 
     </div>
 
-    <!-- Right: log -->
+
+    <!-- 右: ログ -->
     <div class="card log-card">
       <div class="hd">
         <h3>ログ</h3>
         <div class="muted2">events</div>
       </div>
+
       <div class="bd">
         <div id="log"></div>
       </div>
     </div>
+
   </div>
 
-<script src="/static/common.js"></script>
+
+  <!-- hidden elements -->
+  <select id="selLlmModel" style="display:none">
+    <option value="">LLM model...</option>
+  </select>
+
+  <select id="selSoapPrompt" style="display:none">
+    <option value="">Prompt...</option>
+  </select>
+
+  <button id="btnStart" style="display:none"></button>
+  <button id="btnStop" style="display:none"></button>
+
+  <script src="/static/common.js"></script>
+
 </body>
 </html>

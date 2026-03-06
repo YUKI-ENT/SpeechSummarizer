@@ -1,85 +1,61 @@
+/**
+ * SpeechSummarizer – common.js  (Phase 1: カルテビューUI)
+ * ★ 変更点:
+ *   - 左サイドバー（受診履歴）+ 右タイムラインカード表示
+ *   - ASR欄はデフォルト折りたたみ (<details>)
+ *   - LLM欄に draft/approved バッジ + [確定]ボタン
+ *   - カルテNo手動入力 → /api/patient/switch
+ *   - 難聴モードは hearingOverlay で現在ライブASRを拡大表示
+ *   - 録音・ASRモデル切替など既存機能を維持
+ */
 (() => {
   // ===== DOM =====
-  const appVersionEl = document.getElementById("appVersion");
-
+  const appVersionEl = document.getElementById('appVersion');
   const logEl = document.getElementById('log');
   const levelEl = document.getElementById('level');
-  const btnStart = document.getElementById('btnStart');
-  const btnStop  = document.getElementById('btnStop');
-
-  const selSession = document.getElementById('selSession');
+  const btnRec = document.getElementById('btnRec');
   const selAsrModel = document.getElementById('selAsrModel');
-  const chkHearing = document.getElementById('chkHearing');
+  // const chkHearing = document.getElementById('chkHearing');
+  const hearingOverlay = document.getElementById('hearingOverlay');
+  const hearingTextEl = document.getElementById('hearingText');
+  const btnHearingToggle = document.getElementById('btnHearingToggle');
+  const btnHearingClose  = document.getElementById('btnHearingClose');
 
-  const patientIdEl = document.getElementById('patientId');
-  const asrModelNameEl = document.getElementById('asrModelName');
+  const patientInputEl = document.getElementById('patientInput');
+  const patientRecentListEl = document.getElementById('patientRecentList');
+  const btnSwitchPatient = document.getElementById('btnSwitchPatient');
 
-  const txEl = document.getElementById('transcript');
+  const sidebarListEl = document.getElementById('sidebarList');
+  const sidebarPidEl = document.getElementById('sidebarPid');
+  const karteTimeline = document.getElementById('karteTimeline');
 
+
+  // 非表示でも参照のみ使う要素（既存ロジック互換）
   const selLlmModel = document.getElementById('selLlmModel');
   const selSoapPrompt = document.getElementById('selSoapPrompt');
-  const selSoapHistory = document.getElementById('selSoapHistory');
-  const btnSoap = document.getElementById('btnSoap');
-  const btnCopySoap = document.getElementById('btnCopySoap');
-  const summaryEl = document.getElementById('summary');
+  const btnStart = document.getElementById('btnStart');
+  const btnStop = document.getElementById('btnStop');
 
-  // const wsStatusEl = document.getElementById('wsStatus');
-  const dotWs = document.getElementById('dotWs');
-  
-  const btnRec = document.getElementById("btnRec");
-
-  const btnCorrectAsr = document.getElementById('btnCorrectAsr');
-  const btnRebuild = document.getElementById('btnRebuild');
-  const btnCopyAsr = document.getElementById('btnCopyAsr');
-
-  let isRecording = false;
-
-  // ===== state =====
+  // ===== State =====
   let ws = null;
   let audioCtx = null, srcNode = null, procNode = null, stream = null;
+  let isRecording = false;
 
-  // いま「録音中のセッション」(serverが決めた .txt 名)
-  let currentSessionTxt = '';
+  let currentPatientId = '';   // 現在選択中の患者ID
+  let currentSessionTxt = '';   // 現在録音中 / 選択中のセッション(.txt)名
+  let liveAsrText = '';   // ライブASRの累積テキスト
+  let recentPatientIds = [];   // datalist用: 新しい順・重複なし
 
-  function renderRecState(){
-    if(!btnRec) return;
-
-    if(isRecording){
-      btnRec.classList.add("recording");
-    }else{
-      btnRec.classList.remove("recording");
-    }
-  }
-
-  async function startRecordingWrapper(){
-    await btnStart.onclick();   // 既存処理流用
-    isRecording = true;
-    renderRecState();
-  }
-
-  async function stopRecordingWrapper(){
-    await btnStop.onclick();
-    isRecording = false;
-    renderRecState();
-  }
-
-  function log(s){
+  // ===== ログ =====
+  function log(s) {
     if (!logEl) return;
     logEl.textContent += s + '\n';
     logEl.scrollTop = logEl.scrollHeight;
   }
 
-  // function setWsStatus(ok){
-  //   if (wsStatusEl) wsStatusEl.textContent = ok ? 'connected' : 'disconnected';
-  //   if (dotWs){
-  //     dotWs.classList.toggle('ok', !!ok);
-  //     dotWs.classList.toggle('bad', !ok);
-  //   }
-  // }
+  // ===== ログ折りたたみ =====
   document.addEventListener('DOMContentLoaded', () => {
     const btn = document.getElementById('btnToggleLog');
-
-    // 既定：ログは畳む（表示したいならこの1行を消す）
     document.body.classList.add('log-collapsed');
 
     function setLogVisible(show) {
@@ -87,647 +63,873 @@
       document.body.classList.toggle('log-shown', show);
       if (btn) btn.setAttribute('aria-pressed', show ? 'true' : 'false');
     }
-
-    if (btn) {
-      btn.addEventListener('click', () => {
-        const show = document.body.classList.contains('log-collapsed'); // 今畳まれてるなら開く
-        setLogVisible(show);
-      });
-    }
-
-    // オプション：Escでログ閉じる
-    document.addEventListener('keydown', (e) => {
-      if (e.key === 'Escape') setLogVisible(false);
+    if (btn) btn.addEventListener('click', () => {
+      setLogVisible(document.body.classList.contains('log-collapsed'));
     });
+    document.addEventListener('keydown', e => { if (e.key === 'Escape') setLogVisible(false); });
   });
 
-  function setPatient(pid){
-    if (patientIdEl) patientIdEl.textContent = pid || '(未設定)';
+  // ===== 難聴モード =====
+
+  function setHearingMode(on) {
+
+    document.body.classList.toggle('hearing', on);
+
+    if (hearingOverlay)
+      hearingOverlay.classList.toggle('visible', on);
+
+    // ボタンの状態
+    if (btnHearingToggle)
+      btnHearingToggle.setAttribute(
+        'aria-pressed',
+        on ? 'true' : 'false'
+      );
   }
 
-  function clearTranscript(){
-    if (txEl) txEl.value = '';
+  function updateHearingText(text) {
+    if (!hearingTextEl) return;
+    const next = text || '(音声認識待機中)';
+    // ユーザー編集中は上書きしない
+    if (document.activeElement === hearingTextEl)
+      return;
+    // 下端にいる場合のみ自動スクロール
+    const nearBottom =
+      hearingTextEl.scrollHeight -
+      hearingTextEl.scrollTop -
+      hearingTextEl.clientHeight < 80;
+
+    hearingTextEl.value = next;
+
+    if (nearBottom) {
+      hearingTextEl.scrollTop =
+        hearingTextEl.scrollHeight;
+    }
   }
 
-  function clearSummary(){
-    if (summaryEl) summaryEl.value = '';
+  // トグル
+  function toggleHearing() {
+    const on = !document.body.classList.contains('hearing');
+    setHearingMode(on);
   }
 
-  function setAsrModelNameFromMeta(meta){
-    // app.py は {meta:{asr:{model_name/model_path}}} を返す想定
-    const name = meta?.asr?.model_name || meta?.asr?.model_path || '(未設定)';
-    if (asrModelNameEl) asrModelNameEl.textContent = name;
+
+  // 耳ボタン
+  if (btnHearingToggle) {
+    btnHearingToggle.addEventListener('click', (e) => {
+      e.preventDefault();
+      toggleHearing();
+    });
   }
 
-  function safeSelectValue(selectEl, value){
-    if (!selectEl) return;
-    if (!value) return;
-    const ok = [...selectEl.options].some(o => o.value === value);
-    if (ok) selectEl.value = value;
+
+  // ×ボタン
+  if (btnHearingClose) {
+    btnHearingClose.addEventListener('click', (e) => {
+      e.preventDefault();
+      setHearingMode(false);
+    });
   }
 
-  // ===== API loaders =====
-  async function loadAppVersion(){
+
+  // 背景クリックで閉じる
+  if (hearingOverlay) {
+    hearingOverlay.addEventListener('click', (e) => {
+      if (e.target === hearingOverlay)
+        setHearingMode(false);
+    });
+  }
+
+
+  // Escで閉じる
+  document.addEventListener('keydown', (e) => {
+
+    if (e.key !== 'Escape')
+      return;
+
+    if (document.body.classList.contains('hearing'))
+      setHearingMode(false);
+
+  });
+
+  // ===== 録音状態UI =====
+  function renderRecState() {
+    if (!btnRec) return;
+    btnRec.classList.toggle('recording', isRecording);
+  }
+
+  // ===== API helpers =====
+  async function loadAppVersion() {
     if (!appVersionEl) return;
-    try{
+    try {
       const r = await fetch('/api/version');
       const j = await r.json();
-      if (j && j.ok && typeof j.version === 'string'){
-        appVersionEl.textContent = j.version;
-      }else{
-        appVersionEl.textContent = '-';
-      }
-    }catch(e){
-      appVersionEl.textContent = '-';
-    }
+      appVersionEl.textContent = (j && j.ok && j.version) ? j.version : '-';
+    } catch { appVersionEl.textContent = '-'; }
   }
 
-  async function loadAsrModels(){
+  async function loadAsrModels() {
     if (!selAsrModel) return;
-    try{
+    try {
       const r = await fetch('/api/asr/models');
       const j = await r.json();
-      selAsrModel.innerHTML = '';
-      const opt0 = document.createElement('option');
-      opt0.value = '';
-      opt0.textContent = 'ASR model...';
-      selAsrModel.appendChild(opt0);
+      selAsrModel.innerHTML = '<option value="">ASR model...</option>';
       (j.models || []).forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m.id;
-        opt.textContent = m.label;
-        selAsrModel.appendChild(opt);
+        const o = document.createElement('option');
+        o.value = m.id; o.textContent = m.label;
+        selAsrModel.appendChild(o);
       });
       if (j.current) selAsrModel.value = j.current;
-      log(`[ui] ASR models loaded (current=${j.current || 'n/a'})`);
-    }catch(e){
-      log(`[ui] loadAsrModels failed: ${e}`);
-    }
+    } catch (e) { log(`[ui] loadAsrModels failed: ${e}`); }
   }
 
-  async function loadLlmModels(){
-    if (!selLlmModel) return;
-    try{
+  // LLMモデル一覧（カード内ドロップダウン用）
+  let llmModelList = [];
+  async function loadLlmModels() {
+    try {
       const r = await fetch('/api/llm/models');
       const j = await r.json();
-      if (!j || !j.ok) throw new Error(j?.error || 'LLM models unavailable');
-
-      selLlmModel.innerHTML = '';
-      const opt0 = document.createElement('option');
-      opt0.value = '';
-      opt0.textContent = 'LLM model...';
-      selLlmModel.appendChild(opt0);
-
-      (j.models || []).forEach(m => {
-        const opt = document.createElement('option');
-        opt.value = m;
-        opt.textContent = m;
-        selLlmModel.appendChild(opt);
-      });
-
-      safeSelectValue(selLlmModel, j.default_model);
-    }catch(e){
-      log(`[ui] loadLlmModels failed: ${e}`);
-    }
+      llmModelList = j.ok ? (j.models || []) : [];
+      // hidden select も更新
+      if (selLlmModel) {
+        selLlmModel.innerHTML = '<option value="">LLM model...</option>' +
+          llmModelList.map(m => `<option value="${m}">${m}</option>`).join('');
+        if (j.default_model) selLlmModel.value = j.default_model;
+      }
+    } catch (e) { log(`[ui] loadLlmModels failed: ${e}`); }
   }
 
-  async function loadLlmPrompts(){
-    if (!selSoapPrompt) return;
-    try{
+  // LLMプロンプト一覧（カード内ドロップダウン用）
+  let llmPromptList = [];
+  let llmDefaultPromptId = '';
+  async function loadLlmPrompts() {
+    try {
       const r = await fetch('/api/llm/prompts');
       const j = await r.json();
-      if (!j || !j.ok) throw new Error(j?.error || 'Prompt list unavailable');
+      if (!j || !j.ok) return;
+      llmPromptList = j.items || [];
+      llmDefaultPromptId = j.default_prompt_id || '';
+      if (selSoapPrompt) {
+        selSoapPrompt.innerHTML = '<option value="">Prompt...</option>' +
+          llmPromptList.map(it => `<option value="${it.id}">${it.label || it.id}</option>`).join('');
+        if (llmDefaultPromptId) selSoapPrompt.value = llmDefaultPromptId;
+      }
+    } catch (e) { log(`[ui] loadLlmPrompts failed: ${e}`); }
+  }
 
-      const cur = selSoapPrompt.value;
-      selSoapPrompt.innerHTML = '';
+  async function loadRecentPatients() {
+    if (!patientRecentListEl) return;
 
-      const opt0 = document.createElement('option');
-      opt0.value = '';
-      opt0.textContent = 'Prompt...';
-      selSoapPrompt.appendChild(opt0);
+    try {
+      const r = await fetch('/api/sessions');
+      const j = await r.json();
+      const items = Array.isArray(j?.items) ? j.items : [];
 
-      (j.items || []).forEach(it => {
-        const o = document.createElement('option');
-        o.value = it.id;
-        o.textContent = it.label || it.id;
-        selSoapPrompt.appendChild(o);
-      });
+      const seen = new Set();
+      recentPatientIds = [];
 
-      // restore / default
-      safeSelectValue(selSoapPrompt, cur);
-      if (!selSoapPrompt.value) safeSelectValue(selSoapPrompt, j.default_prompt_id);
-      if (!selSoapPrompt.value && (j.items || []).length) selSoapPrompt.value = j.items[0].id;
-    }catch(e){
-      log(`[ui] loadLlmPrompts failed: ${e}`);
+      for (const it of items) {
+        const pid = String(it?.patient_id || '').trim();
+        if (!pid || seen.has(pid)) continue;
+        seen.add(pid);
+        recentPatientIds.push(pid);
+      }
+
+      patientRecentListEl.innerHTML = recentPatientIds
+        .map(pid => `<option value="${e_(pid)}"></option>`)
+        .join('');
+
+      log(`[patient] recent list loaded: ${recentPatientIds.length}`);
+    } catch (e) {
+      log(`[patient] loadRecentPatients failed: ${e}`);
     }
   }
 
-  // function getSessionForLlm(){
-  //   // 録音中は server が送ってくる currentSessionTxt を優先
-  //   if (btnStart && btnStart.disabled && currentSessionTxt) return currentSessionTxt;
-  //   return (selSession?.value || '').trim();
-  // }
-  function getSessionForLlm(){
-    // 画面が「今のセッション」を持っているなら、常にそれを使う
-    // （selSession に古い別患者が残っていても誤爆しない）
-    if (currentSessionTxt) return currentSessionTxt;
-    return (selSession?.value || '').trim();
+  // ===== 患者セッション一覧の読み込み →サイドバー + タイムライン描画 =====
+  async function loadPatientSessions(pid, opts = {}) {
+    if (!pid) return;
+    try {
+      const r = await fetch(`/api/patient/${encodeURIComponent(pid)}/sessions`);
+      const j = await r.json();
+      if (!j || !j.ok) throw new Error(j?.error || 'failed');
+      renderSidebar(pid, j.sessions || []);
+      renderTimeline(pid, j.sessions || [], opts);
+    } catch (e) {
+      log(`[patient] loadPatientSessions failed: ${e}`);
+    }
   }
 
-  async function loadLlmHistory(opts={}){
-    if (!selSoapHistory) return;
-    const session = getSessionForLlm();
-    if (!session){
-      selSoapHistory.innerHTML = '<option value="">AI履歴</option>';
+  // ===== サイドバー描画 =====
+  function renderSidebar(pid, sessions) {
+    if (sidebarPidEl) sidebarPidEl.textContent = pid || '-';
+    if (!sidebarListEl) return;
+
+    if (!sessions.length) {
+      sidebarListEl.innerHTML = '<div class="muted2 sidebar-empty">セッションなし</div>';
       return;
     }
-    try{
-      const r = await fetch('/api/llm/history?session=' + encodeURIComponent(session));
-      const j = await r.json();
-      if (!j || !j.ok) throw new Error(j?.error || 'LLM history unavailable');
 
-      const cur = selSoapHistory.value;
-      selSoapHistory.innerHTML = '';
+    sidebarListEl.innerHTML = sessions.map(s => {
+      const isCurrent = s.is_current;
+      const hasApproved = !!s.approved_file;
+      const hasLlm = s.llm_files && s.llm_files.length > 0;
+      const icon = isCurrent ? '🎙' : (hasApproved ? '✅' : (hasLlm ? '📄' : '📝'));
+      const cls = isCurrent ? 'sidebar-item sidebar-item--current' : 'sidebar-item';
+      return `<div class="${cls}" data-session="${e_(s.session_txt)}" title="${e_(s.session_txt)}">
+        <span class="sidebar-icon">${icon}</span>
+        <span class="sidebar-date">${e_(s.date)}</span>
+        <span class="sidebar-time">${e_(s.time)}</span>
+      </div>`;
+    }).join('');
 
-      const opt0 = document.createElement('option');
-      opt0.value = '';
-      opt0.textContent = '履歴…';
-      selSoapHistory.appendChild(opt0);
+    // サイドバーアイテムクリックでタイムラインにスクロール
+    sidebarListEl.querySelectorAll('.sidebar-item').forEach(el => {
+      el.addEventListener('click', () => {
+        const sid = el.dataset.session;
+        const card = karteTimeline?.querySelector(`[data-session="${sid}"]`);
+        if (card) card.scrollIntoView({ behavior: 'smooth', block: 'start' });
+      });
+    });
+  }
 
-      (j.items || []).forEach(it => {
-        const o = document.createElement('option');
-        o.value = it.id;
-        o.textContent = it.label || it.id;
-        selSoapHistory.appendChild(o);
+  // HTML escapeユーティリティ
+  function e_(s) {
+    return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  // ===== タイムライン描画 =====
+  function renderTimeline(pid, sessions, opts = {}) {
+    if (!karteTimeline) return;
+
+    if (!sessions.length) {
+      karteTimeline.innerHTML = '<div class="karte-empty muted2">受診履歴がありません</div>';
+      return;
+    }
+
+    karteTimeline.innerHTML = sessions.map(s => buildCard(pid, s)).join('');
+
+    // カード内イベント登録
+    karteTimeline.querySelectorAll('.karte-card').forEach(card => {
+      const session = card.dataset.session;
+
+      // LLM送信ボタン
+      card.querySelectorAll('.btn-llm-run').forEach(btn => {
+        btn.addEventListener('click', () => runLlmForCard(card, session));
       });
 
-      safeSelectValue(selSoapHistory, cur);
+      // 確定ボタン
+      card.querySelectorAll('.btn-approve').forEach(btn => {
+        btn.addEventListener('click', async () => {
+          const llmFile = btn.dataset.llmFile;
+          await approveFile(card, session, llmFile);
+        });
+      });
 
-      // セッション切替直後など、履歴があり、かつ何も選ばれていない場合は最新を自動表示
-      const wantLatest = !!opts.autoShowLatest;
-      const items = (j.items || []);
-      if (wantLatest && (!selSoapHistory.value) && items.length){
-        const latestId = items[0].id;
-        if (latestId){
-          selSoapHistory.value = latestId;
-          await loadLlmHistoryItem(latestId);
-        }
+      // LLM履歴クリックで内容ロード
+      card.querySelectorAll('.llm-history-item').forEach(el => {
+        el.addEventListener('click', async () => {
+          const llmFile = el.dataset.llmFile;
+          await loadLlmContent(card, session, llmFile);
+        });
+      });
+
+      // ASR補正ボタン
+      card.querySelectorAll('.btn-correct-asr').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          await correctAsr(card, session);
+        });
+      });
+
+      // ASR元に戻すボタン
+      card.querySelectorAll('.btn-rebuild-asr').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          await rebuildAsr(card, session);
+        });
+      });
+
+      // Copy ボタン (ASR)
+      card.querySelectorAll('.btn-copy-asr').forEach(btn => {
+        btn.addEventListener('click', (e) => {
+          e.preventDefault();
+          e.stopPropagation();
+          const pre = card.querySelector('.asr-text');
+          if (pre) navigator.clipboard.writeText(pre.textContent).catch(() => { });
+        });
+      });
+
+      // Copy ボタン (LLM)
+      card.querySelectorAll('.btn-copy-llm').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const pre = card.querySelector('.llm-text');
+          if (pre) navigator.clipboard.writeText(pre.textContent).catch(() => { });
+        });
+      });
+    });
+
+    // 各カードのLLMを自動ロード
+    // ルール:
+    //   1) 確定済みがあればそれを表示
+    //   2) 確定済みがなければ、最新LLMを表示（autoShowLatest時）
+    //   3) LLM履歴がなければ何もしない
+    karteTimeline.querySelectorAll('.karte-card').forEach(card => {
+      const session = card.dataset.session;
+      const approvedEl = card.querySelector('.llm-history-item[data-approved="true"]');
+      const firstLlm = card.querySelector('.llm-history-item');
+
+      if (approvedEl) {
+        loadLlmContent(card, session, approvedEl.dataset.llmFile);
+      } else if (firstLlm && opts.autoShowLatest) {
+        loadLlmContent(card, session, firstLlm.dataset.llmFile);
       }
-    }catch(e){
-      log(`[ui] loadLlmHistory failed: ${e}`);
-    }
+    });
   }
 
-  async function loadLlmHistoryItem(name){
-    if (!name) return;
-    try{
-      // console.log("DEBUG: loadLlmHistoryItem called with:", name);
-      const r = await fetch('/api/llm/history/item/' + encodeURIComponent(name));
-      const j = await r.json();
-      if (!j || !j.ok) throw new Error(j?.error || 'LLM history item unavailable');
-      if (summaryEl){
-        summaryEl.value = j.summary || '';
-        summaryEl.scrollTop = 0;
-      }
-      log(`[llm] loaded history ${name}`);
-    }catch(e){
-      log(`[llm] load history failed: ${e}`);
+  // ===== カード1枚のHTML生成 =====
+  function buildCard(pid, s) {
+    const isCurrent = s.is_current;
+    const approvedFile = s.approved_file || '';
+    const llmFiles = s.llm_files || [];
+
+    // セッションヘッダー
+    const badgeCls = isCurrent ? 'badge-current' : (approvedFile ? 'badge-approved' : 'badge-draft');
+    const badgeLabel = isCurrent ? '● 録音中' : (approvedFile ? '✅ 確定済' : (llmFiles.length ? '📄 下書き' : '📝 ASRのみ'));
+
+    // LLMファイル一覧（ボタン群）
+    let llmHistoryHtml = '';
+    if (llmFiles.length) {
+      llmHistoryHtml = `<div class="llm-history-list">` +
+        llmFiles.map(f => {
+          const parts = f.split('__');
+          const modelShort = (parts[1] || '').split(':')[0];
+          const promptShort = parts[2] || '';
+          const isApproved = (f === approvedFile);
+          return `<span class="llm-history-item ${isApproved ? 'llm-approved' : ''}"
+            data-llm-file="${e_(f)}" data-approved="${isApproved}"
+            title="${e_(f)}">${e_(modelShort)}/${e_(promptShort)}</span>`;
+        }).join('') +
+        `</div>`;
     }
+
+    // 確定ボタン（承認前 & LLMあり のカードのみ）
+    const approveHtml = (llmFiles.length && !approvedFile)
+      ? `<button class="btn btn-sm btn-approve-cta" data-llm-file="" style="display:none">✓ 確定</button>`
+      : (approvedFile
+        ? `<span class="badge-ts-approved" title="${e_(approvedFile)}">✅ 確定済</span>`
+        : '');
+
+    // LLMセクション（ヘッダーツールバー）
+    const llmDefaultModel = selLlmModel?.value || '';
+    const llmDefaultPrompt = selSoapPrompt?.value || llmDefaultPromptId || '';
+    const modelOptions = llmModelList.map(m =>
+      `<option value="${e_(m)}" ${m === llmDefaultModel ? 'selected' : ''}>${e_(m)}</option>`).join('');
+    const promptOptions = llmPromptList.map(p =>
+      `<option value="${e_(p.id)}" ${p.id === llmDefaultPrompt ? 'selected' : ''}>${e_(p.label || p.id)}</option>`).join('');
+
+    return `
+<div class="karte-card card" data-session="${e_(s.session_txt)}" data-is-current="${isCurrent}">
+  <!-- カードヘッダー -->
+  <div class="karte-card-hd">
+    <div class="karte-card-date">
+      <span class="karte-date">${e_(s.date)}</span>
+      <span class="karte-time">${e_(s.time)}</span>
+    </div>
+    <span class="badge ${badgeCls}">${badgeLabel}</span>
+  </div>
+
+  <!-- ASR欄（折りたたみ） -->
+  <details class="asr-section" ${isCurrent ? 'open' : ''}>
+    <summary class="asr-summary">
+      <span>認識テキスト</span>
+      <span class="asr-tools" style="display:flex; gap:0.5rem;">
+        <button class="btn btn-sm btn-correct-asr" title="認識テキストをルールで補正">補正</button>
+        <button class="btn btn-sm btn-rebuild-asr" title="JSONL原本から .txt を再生成して戻す">元に戻す</button>
+        <button class="btn btn-sm btn-copy-asr" title="ASRテキストをコピー">Copy</button>
+      </span>
+    </summary>
+    <pre class="asr-text" id="asr-${e_(s.session_txt)}">(読み込み中…)</pre>
+  </details>
+
+  <!-- LLM欄 -->
+  <div class="llm-section">
+    <div class="llm-section-hd">
+      <span class="llm-section-title">AI処理結果</span>
+      <div class="llm-tools">
+        ${llmHistoryHtml}
+        <select class="select select-sm card-sel-model">${modelOptions}</select>
+        <select class="select select-sm card-sel-prompt">${promptOptions}</select>
+        <button class="btn btn-primary btn-sm btn-llm-run">送信</button>
+        <button class="btn btn-sm btn-copy-llm" title="AIテキストをコピー">Copy</button>
+      </div>
+    </div>
+    <div class="llm-approve-bar">
+      ${approveHtml}
+    </div>
+    <pre class="llm-text" id="llm-${e_(s.session_txt)}">${llmFiles.length ? '(履歴を選択…)' : '(AIに未送信)'}</pre>
+  </div>
+</div>`;
   }
 
-  async function refreshSessions(){
-    if (!selSession) return;
-    try{
-      const res = await fetch('/api/sessions');
-      const data = await res.json();
-      const items = data.items || [];
-      const prev = selSession.value;
-
-      selSession.innerHTML = '<option value="">認識履歴</option>' +
-        items.map(it => `<option value="${it.name}">${it.label}</option>`).join('');
-
-      // ★今のセッションがあればそれを最優先
-      if (currentSessionTxt && items.some(it => it.name === currentSessionTxt)){
-        selSession.value = currentSessionTxt;
-      }else if (prev && items.some(it => it.name === prev)){
-        selSession.value = prev;
-      }
-    }catch(e){
-      log('[sessions] ERROR: ' + e);
-    }
-  }
-
-  async function loadSession(name){
-    if (!name) return;
-    try{
-      const res = await fetch('/api/session/' + encodeURIComponent(name));
-      const data = await res.json();
-      if (data.error) {
-        log('[session] ' + data.error);
-        return;
-      }
-      setPatient(data.patient_id);
-      currentSessionTxt = name;
-      if (txEl){
-        txEl.value = data.text || '';
-        txEl.scrollTop = txEl.scrollHeight;
-      }
-      clearSummary();
-      setAsrModelNameFromMeta(data.meta || null);
-      await loadLlmHistory({autoShowLatest:true});
-      log(`[session] loaded ${name}`);
-    }catch(e){
-      log('[session] ERROR: ' + e);
-    }
-  }
-
-  async function applyAsrCorrection(){
-    if (!txEl) return;
-
-    try{
-      // 録音中にtxtを上書きすると体験がややこしいので止める（必要なら外してOK）
-      if (btnStart && btnStart.disabled){
-        log('[correct] 録音中は補正できません（停止してから）');
-        return;
-      }
-
-      const session = getSessionForLlm();
-      if (!session){
-        log('[correct] no session selected');
-        return;
-      }
-
-      if (btnCorrectAsr) btnCorrectAsr.disabled = true;
-
+  // ===== ASR補正 =====
+  async function correctAsr(card, sessionTxt) {
+    const btn = card.querySelector('.btn-correct-asr');
+    if (btn) btn.disabled = true;
+    try {
       const r = await fetch('/api/correct/apply', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ session })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: sessionTxt })
       });
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || String(r.status));
-
-      if (txEl && typeof j.text === 'string'){
-        txEl.value = j.text;
-        txEl.scrollTop = txEl.scrollHeight;
+      if (j.changed) {
+        log(`[asr] corrected session=${sessionTxt}`);
+        await loadAsrText(card, sessionTxt);
+      } else {
+        log(`[asr] no correction needed for ${sessionTxt}`);
       }
-      clearSummary(); // transcriptが変わるので要約はクリア推奨
-
-      const st = j.stats || {};
-      log(`[correct] ${j.changed ? 'changed' : 'no change'} lines ${st.lines_in}->${st.lines_out} dropped=${st.dropped_lines} changed_lines=${st.changed_lines}`);
-    }catch(e){
-      log(`[correct] failed: ${e}`);
-    }finally{
-      if (btnCorrectAsr) btnCorrectAsr.disabled = false;
+    } catch (e) {
+      log(`[asr] correct failed: ${e}`);
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
-  async function rebuildFromJsonl(){
-    const session = getSessionForLlm();
-    if (!session){
-      log('[rebuild] no session selected');
-      return;
-    }
-    try{
-      if (btnRebuild) btnRebuild.disabled = true;
-      log(`[rebuild] start session=${session}`);
-
+  // ===== ASR元に戻す =====
+  async function rebuildAsr(card, sessionTxt) {
+    if (!confirm('本当に元の認識テキストに戻しますか？(手作業の編集や補正は失われます)')) return;
+    const btn = card.querySelector('.btn-rebuild-asr');
+    if (btn) btn.disabled = true;
+    try {
       const r = await fetch('/api/session/rebuild', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ session })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: sessionTxt })
       });
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || String(r.status));
-
-      if (txEl){
-        txEl.value = j.text || '';
-        txEl.scrollTop = txEl.scrollHeight;
-      }
-      log(`[rebuild] done segments=${j.stats?.segments ?? '?'} chars=${j.stats?.chars ?? '?'}`);
-    }catch(e){
-      log(`[rebuild] failed: ${e}`);
-    }finally{
-      if (btnRebuild) btnRebuild.disabled = false;
+      log(`[asr] rebuilt session=${sessionTxt}`);
+      await loadAsrText(card, sessionTxt);
+    } catch (e) {
+      log(`[asr] rebuild failed: ${e}`);
+    } finally {
+      if (btn) btn.disabled = false;
     }
   }
 
-  async function copyAsrToClipboard(){
-    if (!txEl) return;
-    const text = txEl.value || '';
-    if (!text){
-      log('[ui] copy: empty');
+  // ===== ASRテキスト読み込み =====
+  async function loadAsrText(card, sessionTxt) {
+    const preEl = card.querySelector('.asr-text');
+    if (!preEl) return;
+    try {
+      const r = await fetch('/api/session/' + encodeURIComponent(sessionTxt));
+      const j = await r.json();
+      preEl.textContent = j.text || '(テキストなし)';
+    } catch (e) {
+      preEl.textContent = `(読み込み失敗: ${e})`;
+    }
+  }
+
+  // ===== LLMテキスト読み込み =====
+  async function loadLlmContent(card, sessionTxt, llmFile) {
+    if (!llmFile) return;
+    const preEl = card.querySelector('.llm-text');
+    if (!preEl) return;
+    try {
+      const r = await fetch('/api/llm/history/item/' + encodeURIComponent(llmFile));
+      const j = await r.json();
+      if (!j || !j.ok) throw new Error(j?.error || 'failed');
+      preEl.textContent = j.summary || '(空)';
+
+      // 選択ハイライト更新
+      card.querySelectorAll('.llm-history-item').forEach(el => {
+        el.classList.toggle('llm-selected', el.dataset.llmFile === llmFile);
+      });
+
+      // 確定ボタンを対象ファイルに紐付け
+      const approveBtn = card.querySelector('.btn-approve-cta');
+      if (approveBtn) {
+        approveBtn.dataset.llmFile = llmFile;
+        approveBtn.style.display = '';
+        approveBtn.classList.add('btn-approve');
+      }
+    } catch (e) {
+      if (preEl) preEl.textContent = `(読み込み失敗: ${e})`;
+    }
+  }
+
+  // ===== LLM送信 =====
+  async function runLlmForCard(card, sessionTxt) {
+    const runBtn = card.querySelector('.btn-llm-run');
+    const preEl = card.querySelector('.llm-text');
+    const asrPre = card.querySelector('.asr-text');
+    const model = card.querySelector('.card-sel-model')?.value || '';
+    const promptId = card.querySelector('.card-sel-prompt')?.value || llmDefaultPromptId || 'soap_v1';
+    const asrText = asrPre?.textContent?.trim() || '';
+
+    if (!asrText || asrText.startsWith('(')) {
+      log('[llm] ASRテキストが空です');
       return;
     }
-    try{
-      await navigator.clipboard.writeText(text);
-      log('[ui] copied SOAP to clipboard');
-    }catch(e){
-      log('[ui] copy failed: ' + e);
-    }
-  }
-
-  // ===== LLM actions =====
-  async function runSoapSummary(){
-    if (!summaryEl || !btnSoap) return;
-    try{
-      btnSoap.disabled = true;
-      if (btnCopySoap) btnCopySoap.disabled = true;
-
-      const session = getSessionForLlm();
-      if (!session){
-        log('[llm] no session selected');
-        return;
-      }
-
-      const model = (selLlmModel?.value || '').trim();
-      const prompt_id = (selSoapPrompt?.value || 'soap_v1').trim();
-      const asr_text = (txEl?.value || '').trim();
-      if (!asr_text){
-        log('[llm] transcript empty');
-        return;
-      }
-
-      // ★追加：送信した瞬間にUIをリセット（結果が届くまでの見た目を明確にする）
-      clearSummary(); // summaryEl.value = ''
-      if (selSoapHistory){
-        selSoapHistory.innerHTML = '<option value="">履歴…</option>';
-        selSoapHistory.value = '';
-      }
-
-      log(`[llm] SOAP start (${session}) model=${model || '(default)'} prompt=${prompt_id}`);
-
+    if (runBtn) runBtn.disabled = true;
+    if (preEl) preEl.textContent = '(処理中…)';
+    try {
       const r = await fetch('/api/llm/soap', {
         method: 'POST',
-        headers: {'Content-Type':'application/json'},
-        body: JSON.stringify({ session, model, prompt_id, asr_text })
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: sessionTxt, model, prompt_id: promptId, asr_text: asrText })
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || String(r.status));
+      if (preEl) preEl.textContent = j.summary || '';
+      log(`[llm] done session=${sessionTxt} model=${j.model} elapsed=${j.elapsed_sec}s`);
+      // 履歴リフレッシュ
+      await refreshCardLlmHistory(card, sessionTxt);
+    } catch (e) {
+      if (preEl) preEl.textContent = `(エラー: ${e})`;
+      log(`[llm] failed: ${e}`);
+    } finally {
+      if (runBtn) runBtn.disabled = false;
+    }
+  }
+
+  // ===== LLM履歴リフレッシュ（送信後） =====
+  async function refreshCardLlmHistory(card, sessionTxt) {
+    try {
+      const r = await fetch('/api/llm/history?session=' + encodeURIComponent(sessionTxt));
+      const j = await r.json();
+      if (!j || !j.ok) return;
+      const items = j.items || [];
+      const listEl = card.querySelector('.llm-history-list');
+      if (listEl) {
+        listEl.innerHTML = items.map(it => {
+          const parts = it.id.split('__');
+          const modelShort = (parts[1] || '').split(':')[0];
+          const promptShort = parts[2] || '';
+          return `<span class="llm-history-item" data-llm-file="${e_(it.id)}" title="${e_(it.id)}">${e_(modelShort)}/${e_(promptShort)}</span>`;
+        }).join('');
+        // 再バインド
+        listEl.querySelectorAll('.llm-history-item').forEach(el => {
+          el.addEventListener('click', async () => {
+            await loadLlmContent(card, sessionTxt, el.dataset.llmFile);
+          });
+        });
+      }
+      // 最新を自動表示
+      if (items.length) await loadLlmContent(card, sessionTxt, items[0].id);
+    } catch (e) {
+      log(`[llm] refreshCardLlmHistory failed: ${e}`);
+    }
+  }
+
+  // ===== LLM確定（承認） =====
+  async function approveFile(card, sessionTxt, llmFile) {
+    if (!llmFile) { log('[approve] no llmFile selected'); return; }
+    const approveBtn = card.querySelector('.btn-approve-cta');
+    if (approveBtn) approveBtn.disabled = true;
+    try {
+      const r = await fetch('/api/llm/approve', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: sessionTxt, llm_file: llmFile })
       });
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || String(r.status));
 
-      // 結果が届いたら表示
-      summaryEl.value = j.summary || '';
-      summaryEl.scrollTop = 0;
-      log(`[llm] SOAP done model=${j.model || '?'} elapsed=${j.elapsed_sec}s saved=${j.saved_name || 'n/a'}`);
-
-      // 履歴一覧も復帰（最新を自動表示）
-      await loadLlmHistory({autoShowLatest:true});
-    }catch(e){
-      log(`[llm] SOAP failed: ${e}`);
-    }finally{
-      btnSoap.disabled = false;
-      if (btnCopySoap) btnCopySoap.disabled = false;
-    }
-  }
-
-  async function copySoapToClipboard(){
-    if (!summaryEl) return;
-    const text = summaryEl.value || '';
-    if (!text){
-      log('[ui] copy: empty');
-      return;
-    }
-    try{
-      if (navigator.clipboard && navigator.clipboard.writeText){
-        await navigator.clipboard.writeText(text);
-      }else{
-        summaryEl.focus();
-        summaryEl.select();
-        document.execCommand('copy');
-        summaryEl.setSelectionRange(0,0);
+      // UIを確定済み表示に変更
+      if (approveBtn) {
+        approveBtn.style.display = 'none';
+        approveBtn.classList.remove('btn-approve');
       }
-      log('[ui] copied SOAP to clipboard');
-    }catch(e){
-      log(`[ui] copy failed: ${e}`);
+      const approveBar = card.querySelector('.llm-approve-bar');
+      if (approveBar) {
+        approveBar.innerHTML = `<span class="badge-ts-approved">✅ 確定済</span>`;
+      }
+      // ヘッダーバッジも更新
+      const badgeEl = card.querySelector('.badge');
+      if (badgeEl) {
+        badgeEl.className = 'badge badge-approved';
+        badgeEl.textContent = '✅ 確定済';
+      }
+      // 承認済みLLM履歴アイテムにもマーク
+      card.querySelectorAll('.llm-history-item').forEach(el => {
+        if (el.dataset.llmFile === llmFile) el.classList.add('llm-approved');
+      });
+      // サイドバーも更新
+      const sidebarItem = sidebarListEl?.querySelector(`[data-session="${sessionTxt}"]`);
+      if (sidebarItem) {
+        sidebarItem.querySelector('.sidebar-icon').textContent = '✅';
+      }
+      log(`[approve] confirmed session=${sessionTxt} llm_file=${llmFile}`);
+    } catch (e) {
+      log(`[approve] failed: ${e}`);
+      if (approveBtn) approveBtn.disabled = false;
     }
   }
 
-  // ===== recording =====
-  const targetSampleRate = 48000;
-  const chunkSamples = 2400; // 50ms @48k
-  let pcmBuf = new Float32Array(0);
+  // ===== 患者切替（手動入力） =====
+  async function switchPatientById(pid) {
+    pid = (pid || '').trim();
+    if (!pid) return;
+    try {
+      if (btnSwitchPatient) btnSwitchPatient.disabled = true;
+      const r = await fetch('/api/patient/switch', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ patient_id: pid })
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || String(r.status));
+      log(`[patient] switched -> ${pid} session=${j.session_txt} resumed=${j.resumed}`);
+      currentPatientId = pid;
+      currentSessionTxt = j.session_txt || '';
 
-  function appendBuf(a, b){
-    const out = new Float32Array(a.length + b.length);
-    out.set(a, 0);
-    out.set(b, a.length);
-    return out;
+      // ★ ここを変更：選択後は入力欄を空に戻す
+      if (patientInputEl) {
+        patientInputEl.value = '';
+        patientInputEl.placeholder = `現在: ${pid}`;
+        patientInputEl.blur();
+      }
+
+      await loadPatientSessions(pid, { autoShowLatest: true });
+      // タイムライン内でASRテキストを読み込む
+      await loadAllCardAsrText();
+      await loadRecentPatients();
+    } catch (e) {
+      log(`[patient] switch failed: ${e}`);
+    } finally {
+      if (btnSwitchPatient) btnSwitchPatient.disabled = false;
+    }
   }
 
-  async function startRecording(){
+  // タイムライン上の全カードのASRを読み込む
+  async function loadAllCardAsrText() {
+    if (!karteTimeline) return;
+    const cards = karteTimeline.querySelectorAll('.karte-card');
+    for (const card of cards) {
+      await loadAsrText(card, card.dataset.session);
+    }
+  }
+
+  // ===== ライブASR追記 =====
+  function appendLiveAsr(text) {
+    if (!text) return;
+    liveAsrText += (liveAsrText ? '\n' : '') + text;
+    updateHearingText(text); // 難聴モードは最新のセグメントのみ
+
+    // 現在セッションカードのASR欄を更新
+    if (currentSessionTxt && karteTimeline) {
+      const preEl = karteTimeline.querySelector(`#asr-${CSS.escape(currentSessionTxt)}`);
+      if (preEl) preEl.textContent = liveAsrText;
+    }
+  }
+
+  function resetLiveAsr() {
+    liveAsrText = '';
+    updateHearingText('(音声認識待機中)');
+  }
+
+  // ===== WebSocket: 常時接続（録音と独立） =====
+  // ★ WSは録音中かどうかに関わらず常にサーバーと接続を保つ。
+  //   これにより dyna_watch_task() の patient_changed が常に届く。
+  let wsReconnectTimer = null;
+
+  function handleWsMessage(ev) {
+    let msg;
+    try { msg = JSON.parse(ev.data); } catch { return; }
+
+    if (msg.type === 'level' && levelEl) levelEl.textContent = msg.dbfs;
+
+    if (msg.type === 'status') {
+      if (msg.patient_id) currentPatientId = msg.patient_id;
+      if (msg.session_txt) currentSessionTxt = msg.session_txt;
+      log('[status] ' + msg.msg + (msg.session_txt ? ' session=' + msg.session_txt : ''));
+      if (currentPatientId) loadPatientSessions(currentPatientId, { autoShowLatest: true })
+        .then(() => loadAllCardAsrText());
+    }
+
+    if (msg.type === 'patient_changed') {
+      currentPatientId = msg.patient_id || '';
+      currentSessionTxt = msg.session_txt || '';
+      // ナビ入力欄にも反映
+      if (patientInputEl && currentPatientId) patientInputEl.value = currentPatientId;
+      resetLiveAsr();
+      log('[patient_changed] ' + currentPatientId);
+      loadPatientSessions(currentPatientId, { autoShowLatest: true })
+        .then(() => loadAllCardAsrText());
+    }
+
+    if (msg.type === 'asr') {
+      if (msg.text) appendLiveAsr(msg.text);
+    }
+  }
+
+  function connectWs() {
+    if (ws && (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING)) return;
+    clearTimeout(wsReconnectTimer);
+
+    const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
+    ws = new WebSocket(wsUrl);
+    ws.binaryType = 'arraybuffer';
+
+    ws.onopen = () => log('[ws] connected');
+    ws.onerror = e => log('[ws] error ' + e);
+    ws.onclose = () => {
+      log('[ws] disconnected – reconnecting in 3s...');
+      // 録音中なら状態をリセット
+      if (isRecording) {
+        isRecording = false;
+        renderRecState();
+        if (selAsrModel) selAsrModel.disabled = false;
+      }
+      wsReconnectTimer = setTimeout(connectWs, 3000);
+    };
+    ws.onmessage = handleWsMessage;
+    log('[ws] connecting...');
+  }
+
+  // ===== 録音: WS接続は使い回し、音声キャプチャのみ開始 =====
+  async function startRecording() {
     try {
-      if (!navigator.mediaDevices || !navigator.mediaDevices.getUserMedia) {
-        log('ERROR: getUserMedia unavailable. Try HTTPS or localhost. protocol=' + location.protocol + ' host=' + location.host);
+      if (!navigator.mediaDevices?.getUserMedia) {
+        log('ERROR: getUserMedia unavailable.');
         return;
       }
-
-      const wsUrl = (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + '/ws';
-      ws = new WebSocket(wsUrl);
-      ws.binaryType = 'arraybuffer';
-
-      // ws.onopen = () => { log('[ws] open'); setWsStatus(true); };
-      // ws.onclose = () => { log('[ws] close'); setWsStatus(false); };
-      ws.onerror = (e) => log('[ws] error ' + e);
-
-      let transcript = '';
-
-      ws.onmessage = (ev) => {
-        const msg = JSON.parse(ev.data);
-
-        if (msg.type === 'level' && levelEl) levelEl.textContent = msg.dbfs;
-
-        if (msg.type === 'status') {
-          setPatient(msg.patient_id);
-          if (msg.session_txt) currentSessionTxt = msg.session_txt;
-          
-          // ★追加：サーバがmetaを返しているなら確定表示
-          if (msg.meta) setAsrModelNameFromMeta(msg.meta);
-          else if (msg.asr_model && asrModelNameEl) asrModelNameEl.textContent = msg.asr_model;
-
-          log('[status] ' + msg.msg + (msg.session_txt ? ' session=' + msg.session_txt : ''));
-          loadLlmHistory({autoShowLatest:true});
-        }
-
-        if (msg.type === 'patient_changed') {
-          setPatient(msg.patient_id);
-          if (msg.session_txt) currentSessionTxt = msg.session_txt;
-          transcript = '';
-          clearTranscript();
-          clearSummary();
-          log('[patient_changed] ' + (msg.patient_id || '(未設定)') + (msg.session_txt ? ' session=' + msg.session_txt : ''));
-          loadLlmHistory({autoShowLatest:true});
-        }
-
-        if (msg.type === 'saved') {
-          log(`[saved] ${msg.wav} dur=${msg.dur}s`);
-        }
-
-        if (msg.type === 'asr') {
-          if (msg.text) {
-            transcript += (transcript ? '\n' : '') + msg.text;
-            if (txEl){
-              txEl.value = transcript;
-              txEl.scrollTop = txEl.scrollHeight;
-            }
-          }
-        }
-
-        if (msg.type === 'error') {
-          log('[error] ' + JSON.stringify(msg));
-        }
-      };
+      // ★ WSが切れていれば再接続（通常は既に接続済み）
+      connectWs();
+      // WS が OPEN になるまで最大3秒待つ
+      if (!ws || ws.readyState !== WebSocket.OPEN) {
+        await new Promise((resolve, reject) => {
+          const t = setTimeout(() => reject(new Error('WS connect timeout')), 3000);
+          const prevOpen = ws.onopen;
+          ws.onopen = e => { clearTimeout(t); if (prevOpen) prevOpen(e); resolve(); };
+        });
+      }
 
       stream = await navigator.mediaDevices.getUserMedia({
         audio: {
-          echoCancellation: false,
-          noiseSuppression: false,
-          autoGainControl: false,
-          channelCount: 1,
-          sampleRate: targetSampleRate,
+          echoCancellation: false, noiseSuppression: false,
+          autoGainControl: false, channelCount: 1, sampleRate: 48000,
         }
       });
-
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
       srcNode = audioCtx.createMediaStreamSource(stream);
+
+      const chunkSamples = 2400;
+      let pcmBuf = new Float32Array(0);
 
       const bufferSize = 2048;
       procNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
-      procNode.onaudioprocess = (ev) => {
+      procNode.onaudioprocess = ev => {
         if (!ws || ws.readyState !== WebSocket.OPEN) return;
         const input = ev.inputBuffer.getChannelData(0);
-        pcmBuf = appendBuf(pcmBuf, input);
-
+        const merged = new Float32Array(pcmBuf.length + input.length);
+        merged.set(pcmBuf); merged.set(input, pcmBuf.length);
+        pcmBuf = merged;
         while (pcmBuf.length >= chunkSamples) {
-          const chunk = pcmBuf.slice(0, chunkSamples);
+          ws.send(pcmBuf.slice(0, chunkSamples).buffer);
           pcmBuf = pcmBuf.slice(chunkSamples);
-          ws.send(chunk.buffer);
         }
       };
-
       srcNode.connect(procNode);
       procNode.connect(audioCtx.destination);
 
-      //録音中Disable
-      if (btnStart) btnStart.disabled = true;
-      if (btnStop) btnStop.disabled = false;
-      if (selSession) selSession.disabled = true;
+      isRecording = true;
+      renderRecState();
       if (selAsrModel) selAsrModel.disabled = true;
-
-      if(btnRebuild) btnRebuild.disabled = true;
-      if(btnCorrectAsr) btnCorrectAsr.disabled = true;
-
-      // 録音開始時点の選択モデルを表示（metaが来るまでの暫定表示）
-      if (asrModelNameEl) {
-        const label = selAsrModel?.selectedOptions?.[0]?.textContent || selAsrModel?.value || '(未設定)';
-        asrModelNameEl.textContent = label;
-      }
-
-      clearTranscript();
-      clearSummary();
-
+      resetLiveAsr();
       log('recording start');
     } catch (e) {
       log('ERROR: ' + e);
     }
   }
 
-  async function stopRecording(){
+  async function stopRecording() {
     try {
       if (procNode) procNode.disconnect();
       if (srcNode) srcNode.disconnect();
       if (audioCtx) await audioCtx.close();
       if (stream) stream.getTracks().forEach(t => t.stop());
-
-      procNode = null; srcNode = null; audioCtx = null; stream = null;
-
-      if (ws) { ws.close(); ws = null; }
-
-      if (btnStart) btnStart.disabled = false;
-      if (btnStop) btnStop.disabled = true;
-      if (selSession) selSession.disabled = false;
-      if (selAsrModel) selAsrModel.disabled = false;
-
-      if(btnRebuild) btnRebuild.disabled = false;
-      if(btnCorrectAsr) btnCorrectAsr.disabled = false;
+      procNode = srcNode = audioCtx = stream = null;
+      // ★ WSは閉じない（常時接続を維持してpatient_changedを受信し続ける）
 
       isRecording = false;
       renderRecState();
+      if (selAsrModel) selAsrModel.disabled = false;
 
-      await refreshSessions();
+      // 停止後にセッション一覧をリフレッシュ
+      if (currentPatientId) {
+        await loadPatientSessions(currentPatientId, { autoShowLatest: true });
+        await loadAllCardAsrText();
+      }
       log('recording stop');
     } catch (e) {
       log('ERROR: ' + e);
     }
   }
 
-  // ===== events =====
-  if (chkHearing){
-    chkHearing.onchange = () => document.body.classList.toggle('hearing', chkHearing.checked);
-  }
-
-  if (selAsrModel){
+  // ===== ASRモデル切替 =====
+  if (selAsrModel) {
     selAsrModel.addEventListener('change', async () => {
       const id = selAsrModel.value;
       if (!id) return;
-      try{
+      try {
         const r = await fetch('/api/asr/model', {
           method: 'POST',
-          headers: {'Content-Type':'application/json'},
+          headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ id })
         });
         const j = await r.json();
-        if (j.ok){
-          log(`[ui] ASR model switched -> ${j.current}`);
-        }else{
-          log(`[ui] ASR model switch failed: ${j.error}`);
-          await loadAsrModels();
-        }
-      }catch(e){
-        log(`[ui] ASR model switch error: ${e}`);
-        await loadAsrModels();
+        if (j.ok) log(`[ui] ASR model -> ${j.current}`);
+        else { log(`[ui] ASR model switch failed: ${j.error}`); await loadAsrModels(); }
+      } catch (e) { log(`[ui] ASR model error: ${e}`); await loadAsrModels(); }
+    });
+  }
+
+  // ===== カルテNo手動入力 =====
+  if (btnSwitchPatient) {
+    btnSwitchPatient.addEventListener('click', () => {
+      switchPatientById(patientInputEl?.value);
+    });
+  }
+  if (patientInputEl) {
+    // 候補選択時は即移動
+    patientInputEl.addEventListener('input', () => {
+      const v = (patientInputEl.value || '').trim();
+      if (!v) return;
+
+      // datalist候補と完全一致した時だけ自動切替
+      if (recentPatientIds.includes(v) && v !== currentPatientId) {
+        switchPatientById(v);
+      }
+    });
+
+    // Enter即切替はやめる
+    patientInputEl.addEventListener('keydown', e => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
       }
     });
   }
 
-  if (selSession){
-    selSession.onchange = async () => {
-      if (btnStart && btnStart.disabled) return; // 録音中は触らない
-      await loadSession(selSession.value);
+  // ===== 録音ボタン =====
+  if (btnRec) {
+    btnRec.onclick = async () => {
+      if (isRecording) await stopRecording();
+      else await startRecording();
     };
   }
-
-  if (selSoapHistory){
-    selSoapHistory.onchange = async () => {
-      const name = selSoapHistory.value;
-      if (!name) return;
-      await loadLlmHistoryItem(name);
-    };
-  }
-
-  if (btnSoap) btnSoap.onclick = () => runSoapSummary();
-  if (btnCopySoap) btnCopySoap.onclick = () => copySoapToClipboard();
-
+  // 旧Start/Stopボタン互換
   if (btnStart) btnStart.onclick = () => startRecording();
   if (btnStop) btnStop.onclick = () => stopRecording();
 
-  if(btnRec) btnRec.onclick = async () => {
-    if(isRecording){
-      await stopRecordingWrapper();
-    }else{
-      await startRecordingWrapper();
-    }
-  };
-
-  if (btnCorrectAsr) btnCorrectAsr.onclick = () => applyAsrCorrection();
-  if (btnRebuild) btnRebuild.onclick = () => rebuildFromJsonl();
-  if (btnCopyAsr) btnCopyAsr.onclick = () => copyAsrToClipboard();
-
-  // ===== init =====
-  // setWsStatus(false);
+  // ===== 初期化 =====
   loadAppVersion();
-  refreshSessions();
   loadAsrModels();
-  loadLlmModels();
-  loadLlmPrompts();
-  loadLlmHistory();
+  loadLlmModels().then(() => loadLlmPrompts());
+  loadRecentPatients();
+  connectWs();  // ★ 起動時にWS接続（常時接続）
 })();
+

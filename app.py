@@ -8,6 +8,7 @@ import json
 import datetime
 import asyncio
 import sys
+
 from pathlib import Path
 from urllib.parse import unquote
 import re
@@ -43,7 +44,7 @@ import hashlib
 # App version (server software version)
 # -------------------------
 # ここを書き換えるだけでUI表示が変わる（config.json には置かない）
-APP_VERSION = "20260303"
+APP_VERSION = "20260306"
 
 # -------------------------
 # Config
@@ -1124,60 +1125,8 @@ async def dyna_watch_task():
             last_batch_sig = sig
 
             if pid:
-                if CURRENT["patient_id"] != pid:
-                    # 切替前セッションを自動LLMに投げる
-                    try:
-                        prev_jsonl = CURRENT.get("jsonl_path")
-                        if prev_jsonl:
-                            enqueue_auto_llm_for_session(Path(prev_jsonl))
-                    except Exception as e:
-                        log(f"[AUTO_LLM] enqueue failed: {e}")
-
-                    # -------------------------
-                    # ここからが「同一日・同一患者なら復帰」の追加部分
-                    # -------------------------
-                    resumed = False
-
-                    # 今日の同一患者の最新セッション(txt)があれば、それを再利用
-                    today_txt = find_latest_session_txt_for_patient_today(pid)  # 例: "123_20260303_101010.txt"
-                    if today_txt:
-                        info = _parse_session_name(today_txt)
-                        if info:
-                            _pid, _stamp = info
-                            txt_path = (OUTPUTS_DIR / today_txt).resolve()
-                            jsonl_path = (OUTPUTS_DIR / today_txt.replace(".txt", ".jsonl")).resolve()
-
-                            # jsonl も存在する時だけ復帰（安全側）
-                            if txt_path.exists() and jsonl_path.exists():
-                                CURRENT["patient_id"] = _pid
-                                CURRENT["session_stamp"] = _stamp
-                                CURRENT["text_path"] = str(txt_path)
-                                CURRENT["jsonl_path"] = str(jsonl_path)
-
-                                # txtに見える区切り + jsonlに type=resume を追記（LLM本文には混ざらない）
-                                append_resume_marker(
-                                    txt_path=CURRENT["text_path"],
-                                    jsonl_path=CURRENT["jsonl_path"],
-                                    patient_id=_pid,
-                                    stamp=_stamp
-                                )
-
-                                resumed = True
-
-                    if not resumed:
-                        # 今日初回 or 既存セッションが見つからない/壊れている → 従来通り新規
-                        new_session(pid)
-
-                    log(f"[SESSION] {'resumed' if resumed else 'switched'} patient_id={pid} txt={CURRENT['text_path']}")
-
-                    await broadcast({
-                        "type": "patient_changed",
-                        "patient_id": pid,
-                        "text_path": CURRENT["text_path"],
-                        "jsonl_path": CURRENT["jsonl_path"],
-                        "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
-                        "resumed": resumed,  # UIで使わないなら消してOK
-                    }, reset_states=True)
+                # ★ Phase 1: 切替ロジックを _do_patient_switch() に共通化
+                await _do_patient_switch(pid)
 
             await asyncio.sleep(0.5)
 
@@ -1198,6 +1147,146 @@ def _parse_session_name(name: str):
     if not m:
         return None
     return m.group("patient_id"), m.group("stamp")
+
+# =========================================
+# Phase 1: カルテビュー用ヘルパー
+# =========================================
+
+def get_approved_llm_file(jsonl_path: Path) -> str | None:
+    """
+    JSONLを読み、最後に記録された type=approved イベントのLLMファイル名を返す。
+    承認が無ければ None。
+    """
+    if not jsonl_path.exists():
+        return None
+    approved = None
+    try:
+        with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    rec = json.loads(line)
+                except Exception:
+                    continue
+                if rec.get("type") == "approved":
+                    approved = rec.get("llm_file")
+    except Exception:
+        pass
+    return approved
+
+def list_patient_sessions(pid: str) -> list[dict]:
+    """
+    患者IDに紐づく全セッション一覧を返す。
+    各セッションにLLMファイル一覧・承認済みファイル名を付加。
+    """
+    pat = f"{pid}_????????_??????.txt"
+    files = sorted(
+        OUTPUTS_DIR.glob(pat),
+        key=lambda p: p.stat().st_mtime,
+        reverse=True
+    )
+    current_txt = CURRENT.get("text_path")
+    current_name = Path(current_txt).name if current_txt else None
+
+    result = []
+    for f in files:
+        info = _parse_session_name(f.name)
+        if not info:
+            continue
+        _pid, stamp = info
+        if _pid != pid:
+            continue
+
+        date_str = f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}"
+        time_str = f"{stamp[9:11]}:{stamp[11:13]}"
+
+        jsonl_path = (OUTPUTS_DIR / f.name.replace(".txt", ".jsonl")).resolve()
+        approved_file = get_approved_llm_file(jsonl_path) if jsonl_path.exists() else None
+
+        llm_pat = f"{pid}_{stamp}__*.txt"
+        llm_files = sorted(
+            LLM_DIR.glob(llm_pat),
+            key=lambda p: p.stat().st_mtime,
+            reverse=True
+        )
+        llm_file_names = [lf.name for lf in llm_files]
+
+        result.append({
+            "session_txt": f.name,
+            "stamp": stamp,
+            "date": date_str,
+            "time": time_str,
+            "is_current": (f.name == current_name),
+            "llm_files": llm_file_names,
+            "approved_file": approved_file,
+        })
+    return result
+
+async def _do_patient_switch(pid: str) -> dict:
+    """
+    患者切替の共通ロジック。
+    dyna_watch_task() と POST /api/patient/switch の両方から呼ぶ。
+    既に同じ患者の場合は何もせず現在セッション情報を返す。
+    """
+    if CURRENT["patient_id"] == pid:
+        return {
+            "patient_id": pid,
+            "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
+            "resumed": False,
+            "switched": False,
+        }
+
+    # 切替前セッションを自動LLMに投げる
+    try:
+        prev_jsonl = CURRENT.get("jsonl_path")
+        if prev_jsonl:
+            enqueue_auto_llm_for_session(Path(prev_jsonl))
+    except Exception as e:
+        log(f"[AUTO_LLM] enqueue failed: {e}")
+
+    resumed = False
+    today_txt = find_latest_session_txt_for_patient_today(pid)
+    if today_txt:
+        info = _parse_session_name(today_txt)
+        if info:
+            _pid, _stamp = info
+            txt_path = (OUTPUTS_DIR / today_txt).resolve()
+            jsonl_path = (OUTPUTS_DIR / today_txt.replace(".txt", ".jsonl")).resolve()
+            if txt_path.exists() and jsonl_path.exists():
+                CURRENT["patient_id"] = _pid
+                CURRENT["session_stamp"] = _stamp
+                CURRENT["text_path"] = str(txt_path)
+                CURRENT["jsonl_path"] = str(jsonl_path)
+                append_resume_marker(
+                    txt_path=CURRENT["text_path"],
+                    jsonl_path=CURRENT["jsonl_path"],
+                    patient_id=_pid,
+                    stamp=_stamp
+                )
+                resumed = True
+
+    if not resumed:
+        new_session(pid)
+
+    log(f"[SESSION] {'resumed' if resumed else 'switched'} patient_id={pid} txt={CURRENT['text_path']}")
+
+    await broadcast({
+        "type": "patient_changed",
+        "patient_id": pid,
+        "text_path": CURRENT["text_path"],
+        "jsonl_path": CURRENT["jsonl_path"],
+        "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
+        "resumed": resumed,
+    }, reset_states=True)
+
+    return {
+        "patient_id": CURRENT["patient_id"],
+        "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
+        "resumed": resumed,
+        "switched": True,
+    }
 
 # -------------------------
 # Web
@@ -1289,6 +1378,52 @@ async def api_llm_history_item(item_id: str):
 
     txt = p.read_text(encoding="utf-8", errors="replace")
     return {"ok": True, "summary": txt}
+
+# ★ Phase 1: LLM承認 API
+@app.post("/api/llm/approve")
+async def api_llm_approve(payload: Dict[str, Any] = Body(...)):
+    """
+    指定セッションのJSONLに type=approved を追記して原本を確定する。
+    ファイル自体は変更しない（追記のみ）。
+    payload: { "session": "pid_stamp.txt", "llm_file": "pid_stamp__model__prompt__ts.txt" }
+    """
+    session_txt = (payload.get("session") or "").strip()
+    llm_file    = (payload.get("llm_file") or "").strip()
+
+    if not session_txt or not llm_file:
+        return JSONResponse({"ok": False, "error": "session and llm_file required"}, status_code=400)
+
+    info = _parse_session_name(session_txt)
+    if not info:
+        return JSONResponse({"ok": False, "error": "invalid session name"}, status_code=400)
+
+    # パストラバーサル防止
+    if "/" in llm_file or "\\" in llm_file or ".." in llm_file:
+        return JSONResponse({"ok": False, "error": "invalid llm_file"}, status_code=400)
+
+    jsonl_path = (OUTPUTS_DIR / session_txt.replace(".txt", ".jsonl")).resolve()
+    if OUTPUTS_DIR.resolve() not in jsonl_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+    if not jsonl_path.exists():
+        return JSONResponse({"ok": False, "error": "jsonl not found"}, status_code=404)
+
+    llm_path = (LLM_DIR / llm_file).resolve()
+    if LLM_DIR.resolve() not in llm_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid llm path"}, status_code=400)
+    if not llm_path.exists():
+        return JSONResponse({"ok": False, "error": "llm file not found"}, status_code=404)
+
+    ts = now_iso()
+    append_jsonl({
+        "type": "approved",
+        "ts": ts,
+        "patient_id": info[0],
+        "stamp": info[1],
+        "llm_file": llm_file,
+    }, str(jsonl_path))
+
+    log(f"[APPROVE] session={session_txt} llm_file={llm_file}")
+    return {"ok": True, "approved_file": llm_file, "ts": ts}
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
@@ -1691,7 +1826,34 @@ async def api_session_rebuild(payload: Dict[str, Any] = Body(...)):
         "stats": {"segments": len(parts), "chars": len(rebuilt)},
         "backup": backup_name,
     }
-    
+
+# ★ Phase 1: 患者セッション一覧 API
+@app.get("/api/patient/{pid}/sessions")
+def api_patient_sessions(pid: str):
+    """
+    患者IDに紐づく全セッション一覧を返す。
+    各セッションにLLMファイル一覧・承認済みファイル名を付加。
+    """
+    pid = (pid or "").strip()
+    if not pid:
+        return JSONResponse({"ok": False, "error": "patient_id required"}, status_code=400)
+    sessions = list_patient_sessions(pid)
+    return {"ok": True, "patient_id": pid, "sessions": sessions}
+
+# ★ Phase 1: 手動カルテNo入力による患者切替 API
+@app.post("/api/patient/switch")
+async def api_patient_switch(payload: Dict[str, Any] = Body(...)):
+    """
+    手動入力のカルテNo（patient_id）で患者を切替える。
+    dyna_watch_task と同じ _do_patient_switch() を呼ぶ。
+    payload: { "patient_id": "123456" }
+    """
+    pid = (payload.get("patient_id") or "").strip()
+    if not pid:
+        return JSONResponse({"ok": False, "error": "patient_id required"}, status_code=400)
+    result = await _do_patient_switch(pid)
+    return {"ok": True, **result}
+
 # -------------------------
 # Per-connection state
 # -------------------------
