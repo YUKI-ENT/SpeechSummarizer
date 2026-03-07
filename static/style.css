@@ -644,14 +644,14 @@ body.hearing textarea.transcript {
 /* --- メインレイアウト: サイドバー + タイムライン + ログ --- */
 .main-layout {
   display: grid;
-  grid-template-columns: 280px 1fr 0px;
+  grid-template-columns: 320px 1fr 0px;
   gap: 16px;
   align-items: start;
   min-height: calc(100vh - var(--page-top) - var(--page-bottom));
 }
 
 body.log-shown .main-layout {
-  grid-template-columns: 280px 1fr 280px;
+  grid-template-columns: 320px 1fr 280px;
 }
 
 body.log-collapsed .main-layout .log-card {
@@ -685,9 +685,10 @@ body.log-shown #btnToggleLog {
   display: flex;
   flex-wrap: wrap;
   gap: 8px 16px;
-  background: rgba(255, 255, 255, 0.04);
-  border-radius: 10px;
-  border: 1px solid rgba(255, 255, 255, 0.08);
+  padding: 12px 14px;
+  background: rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.1);
+  color: var(--txt);
 }
 
 .sidebar-patient-info .info-row {
