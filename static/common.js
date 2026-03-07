@@ -670,15 +670,16 @@
   }
 
   // ===== 患者切替（手動入力） =====
-  async function switchPatientById(pid) {
+  async function switchPatientById(pid, forceCreate = false) {
     pid = (pid || '').trim();
     if (!pid) return;
     try {
       if (btnSwitchPatient) btnSwitchPatient.disabled = true;
+      const createNew = isRecording || forceCreate;
       const r = await fetch('/api/patient/switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ patient_id: pid })
+        body: JSON.stringify({ patient_id: pid, create_new: createNew })
       });
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || String(r.status));
@@ -798,7 +799,7 @@
         targetPid = currentPatientId || 'unknown';
       }
       if (targetPid !== currentPatientId || !currentSessionTxt) {
-        await switchPatientById(targetPid);
+        await switchPatientById(targetPid, true);
       }
 
       if (!navigator.mediaDevices?.getUserMedia) {

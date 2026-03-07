@@ -1129,7 +1129,7 @@ async def dyna_watch_task():
 
             if pid:
                 # ★ Phase 1: 切替ロジックを _do_patient_switch() に共通化
-                await _do_patient_switch(pid)
+                await _do_patient_switch(pid, create_new=False)
 
             await asyncio.sleep(0.5)
 
@@ -1227,7 +1227,7 @@ def list_patient_sessions(pid: str) -> list[dict]:
         })
     return result
 
-async def _do_patient_switch(pid: str) -> dict:
+async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
     """
     患者切替の共通ロジック。
     dyna_watch_task() と POST /api/patient/switch の両方から呼ぶ。
@@ -1271,9 +1271,16 @@ async def _do_patient_switch(pid: str) -> dict:
                 resumed = True
 
     if not resumed:
-        new_session(pid)
+        if create_new:
+            new_session(pid)
+        else:
+            CURRENT["patient_id"] = pid
+            CURRENT["session_stamp"] = None
+            CURRENT["text_path"] = None
+            CURRENT["jsonl_path"] = None
+            CURRENT["full_text"] = ""
 
-    log(f"[SESSION] {'resumed' if resumed else 'switched'} patient_id={pid} txt={CURRENT['text_path']}")
+    log(f"[SESSION] {'resumed' if resumed else 'switched'} patient_id={pid} txt={CURRENT['text_path']} create_new={create_new}")
 
     await broadcast({
         "type": "patient_changed",
@@ -1849,12 +1856,13 @@ async def api_patient_switch(payload: Dict[str, Any] = Body(...)):
     """
     手動入力のカルテNo（patient_id）で患者を切替える。
     dyna_watch_task と同じ _do_patient_switch() を呼ぶ。
-    payload: { "patient_id": "123456" }
+    payload: { "patient_id": "123456", "create_new": true/false }
     """
     pid = (payload.get("patient_id") or "").strip()
+    create_new = payload.get("create_new", True)
     if not pid:
         return JSONResponse({"ok": False, "error": "patient_id required"}, status_code=400)
-    result = await _do_patient_switch(pid)
+    result = await _do_patient_switch(pid, create_new=create_new)
     return {"ok": True, **result}
 
 # -------------------------
