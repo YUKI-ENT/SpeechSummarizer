@@ -644,14 +644,14 @@ body.hearing textarea.transcript {
 /* --- メインレイアウト: サイドバー + タイムライン + ログ --- */
 .main-layout {
   display: grid;
-  grid-template-columns: 200px 1fr 0px;
+  grid-template-columns: 280px 1fr 0px;
   gap: 16px;
   align-items: start;
   min-height: calc(100vh - var(--page-top) - var(--page-bottom));
 }
 
 body.log-shown .main-layout {
-  grid-template-columns: 200px 1fr 280px;
+  grid-template-columns: 280px 1fr 280px;
 }
 
 body.log-collapsed .main-layout .log-card {
@@ -682,29 +682,31 @@ body.log-shown #btnToggleLog {
 }
 
 .sidebar-patient-info {
-  margin-top: 8px;
-  font-size: 13px;
-  line-height: 1.4;
-  color: var(--txt);
-  padding: 8px;
-  background: rgba(0, 0, 0, 0.2);
-  border-radius: 8px;
-  border: 1px solid rgba(255, 255, 255, 0.05);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px 16px;
+  background: rgba(255, 255, 255, 0.04);
+  border-radius: 10px;
+  border: 1px solid rgba(255, 255, 255, 0.08);
 }
 
 .sidebar-patient-info .info-row {
   display: flex;
-  justify-content: space-between;
-  margin-bottom: 2px;
+  align-items: baseline;
+  gap: 6px;
+  margin-bottom: 0;
+  font-size: 13px;
 }
 
 .sidebar-patient-info .info-label {
-  color: var(--muted);
+  color: var(--muted2);
   font-size: 11px;
+  white-space: nowrap;
 }
 
 .sidebar-patient-info .info-val {
   font-weight: 600;
+  white-space: nowrap;
 }
 
 .sidebar-body {

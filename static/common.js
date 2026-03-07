@@ -334,10 +334,10 @@
         const _dob = e_(pInfo.dob) || '-';
 
         infoEl.innerHTML = `
-          <div class="info-row"><span class="info-label">患者ID</span><span class="info-val">${pid}</span></div>
+          <div class="info-row"><span class="info-label">ID</span><span class="info-val">${pid}</span></div>
           <div class="info-row"><span class="info-label">氏名</span><span class="info-val">${_name}</span></div>
-          <div class="info-row"><span class="info-label">性別</span><span class="info-val">${_gender}</span></div>
           <div class="info-row"><span class="info-label">生年月日</span><span class="info-val">${_dob}</span></div>
+          <div class="info-row"><span class="info-label">性別</span><span class="info-val">${_gender}</span></div>
           <div class="info-row"><span class="info-label">年齢</span><span class="info-val">${_ageStr}</span></div>
         `;
         infoEl.style.display = 'block';
