@@ -79,6 +79,11 @@
   <!-- 難聴モード字幕 -->
   <div id="hearingOverlay" class="hearing-overlay">
 
+    <div class="hearing-zoom-controls">
+      <button id="btnZoomOut" class="btn btn-zoom" type="button" title="文字を小さく">－</button>
+      <button id="btnZoomIn" class="btn btn-zoom" type="button" title="文字を大きく">＋</button>
+    </div>
+
     <button id="btnHearingClose" class="btn hearing-close" type="button" title="難聴モードを終了">
       終了
     </button>
@@ -96,6 +101,7 @@
       <div class="hd">
         <h3>受診履歴</h3>
         <span class="muted2 sidebar-pid" id="sidebarPid">-</span>
+        <div id="sidebarPatientInfo" class="sidebar-patient-info"></div>
       </div>
 
       <div class="bd sidebar-body" id="sidebarList">

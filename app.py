@@ -110,6 +110,7 @@ def load_config(force_reload: bool = False) -> dict:
 
 CFG = load_config()
 
+
 def ensure_dir(p: Path):
     p.mkdir(parents=True, exist_ok=True)
 def resolve_relpath(p: str | Path) -> Path:
@@ -118,8 +119,10 @@ def resolve_relpath(p: str | Path) -> Path:
 
 OUTPUTS_DIR = resolve_relpath(CFG.get("outputs_dir", "data/sessions"))
 WAV_DIR = resolve_relpath(CFG.get("wav_dir", "data/wav"))
+PATIENT_DATA_PATH = resolve_relpath(CFG.get("patient_data_path", "data/patient_data.jsonl"))
 ensure_dir(OUTPUTS_DIR)
 ensure_dir(WAV_DIR)
+PATIENT_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 CORRECTION_RULES_PATH = resolve_relpath(CFG.get("correction_rules_path", "corrections.json"))
 CORRECTIONS_DIR = resolve_relpath(CFG.get("corrections_dir", "data/corrections"))
@@ -635,7 +638,7 @@ def _has_llm_history_for_prompt(jsonl_path: Path, *, prompt_id: str) -> bool:
     except Exception:
         return False
     
-def enqueue_auto_llm_for_session(jsonl_path: Path):
+def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str = "switch"):
     """
     セッション終了（患者切替など）タイミングで、当該セッションのjsonlを自動でLLMに投げる。
     """
@@ -674,6 +677,7 @@ def enqueue_auto_llm_for_session(jsonl_path: Path):
 
         _auto_llm_q.put_nowait({
             "jsonl_path": str(jsonl_path),
+            "reason": reason,
             **it,  # model_id, prompt_id, asr_correct
         })
 
@@ -766,59 +770,6 @@ async def _run_auto_llm_job(job: dict):
 
     log(f"[AUTO_LLM] done jsonl={jsonl_path.name} -> {out_name} dt={dt:.2f}s")
 
-# ==========================================
-# Auto LLM (on patient change / recording stop)
-# ==========================================
-
-AUTO_LLM_ENABLED = bool(CFG.get("auto_llm", False))
-AUTO_LLM_PROMPTS = CFG.get("auto_llm_prompts", []) or []
-AUTO_LLM_MIN_QUALITY = (CFG.get("auto_llm_min_quality") or "good").strip()
-
-# 既に投げた session(jsonl) を二重送信しないためのガード
-_AUTO_LLM_ENQUEUED: set[str] = set()
-
-# 自動LLM用キュー（逐次実行）
-AUTO_LLM_Q: asyncio.Queue[dict] = asyncio.Queue(maxsize=int(CFG.get("auto_llm_queue", 20)))
-
-def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str):
-    """
-    指定 jsonl を auto_llm_prompts に従ってキューに積む。
-    二重送信は _AUTO_LLM_ENQUEUED で防止。
-    """
-    if not AUTO_LLM_ENABLED:
-        return
-    if not jsonl_path or not jsonl_path.exists():
-        return
-    if not AUTO_LLM_PROMPTS:
-        return
-
-    key = str(jsonl_path.resolve())
-    if key in _AUTO_LLM_ENQUEUED:
-        return
-    _AUTO_LLM_ENQUEUED.add(key)
-
-    for p in AUTO_LLM_PROMPTS:
-        try:
-            model_id = (p.get("model_id") or "").strip() or OLLAMA_MODEL_DEFAULT
-            prompt_id = (p.get("prompt_id") or "").strip() or LLM_DEFAULT_PROMPT_ID
-            asr_correct = bool(p.get("asr_correct", False))
-
-            job = {
-                "type": "auto_llm",
-                "ts": now_iso(),
-                "reason": reason,
-                "jsonl_path": str(jsonl_path),
-                "model": model_id,
-                "prompt_id": prompt_id,
-                "asr_correct": asr_correct,
-                "min_quality": AUTO_LLM_MIN_QUALITY,
-            }
-            try:
-                AUTO_LLM_Q.put_nowait(job)
-            except asyncio.QueueFull:
-                log(f"[AUTO_LLM_Q] DROP (queue full) jsonl={jsonl_path.name} prompt={prompt_id}")
-        except Exception as e:
-            log(f"[AUTO_LLM_Q] enqueue error: {e}")
 # -------------------------
 # ASR config (defaults from config.json)
 # -------------------------
@@ -1066,7 +1017,7 @@ def delete_all_dyna_files(paths: list[Path]):
         except Exception as e:
             log(f"[DYNA] delete failed {p}: {e}")
 
-def read_patient_id_from_dyna(path: Path) -> str | None:
+def read_patient_id_from_dyna(path: Path) -> dict | None:
     try:
         with open(path, "rb") as f:
             raw = f.readline()
@@ -1075,12 +1026,68 @@ def read_patient_id_from_dyna(path: Path) -> str | None:
         if not line:
             return None
 
-        pid = line.split(",")[0].strip()
-        return pid if pid.isdigit() else None
+        # Format: 31355,漢字名,半角カナのフリガナ,性別1＝男2＝女,生年月日yyyy/mm/dd
+        parts = line.split(",")
+        if not parts:
+            return None
+            
+        pid = parts[0].strip()
+        if not pid.isdigit():
+            return None
+            
+        name = parts[1].strip() if len(parts) > 1 else ""
+        kana = parts[2].strip() if len(parts) > 2 else ""
+        gender = parts[3].strip() if len(parts) > 3 else ""
+        dob = parts[4].strip() if len(parts) > 4 else ""
+        
+        return {
+            "patient_id": pid,
+            "name": name,
+            "kana": kana,
+            "gender": gender,
+            "dob": dob,
+            "last_seen_ts": now_iso()
+        }
 
     except Exception as e:
         log(f"[DYNA] read error {path}: {e}")
         return None
+
+# -------------------------
+# Patient Data Cache
+# -------------------------
+_PATIENT_INFO_CACHE: dict[str, dict] = {}
+
+def load_patient_data():
+    global _PATIENT_INFO_CACHE
+    if not PATIENT_DATA_PATH.exists():
+        return
+    try:
+        with PATIENT_DATA_PATH.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    obj = json.loads(line)
+                    pid = str(obj.get("patient_id", ""))
+                    if pid:
+                        _PATIENT_INFO_CACHE[pid] = obj
+                except Exception:
+                    continue
+        log(f"[PATIENT] loaded {len(_PATIENT_INFO_CACHE)} patients from {PATIENT_DATA_PATH.name}")
+    except Exception as e:
+        log(f"[PATIENT] load error: {e}")
+
+def save_patient_info(info: dict):
+    if not info or "patient_id" not in info:
+        return
+    pid = str(info["patient_id"])
+    _PATIENT_INFO_CACHE[pid] = info
+    append_jsonl_line(PATIENT_DATA_PATH, info)
+
+def get_patient_info(pid: str) -> dict | None:
+    return _PATIENT_INFO_CACHE.get(str(pid))
 
 # WSごとのStateを持つ
 CLIENTS: dict[WebSocket, "State"] = {}
@@ -1122,12 +1129,14 @@ async def dyna_watch_task():
 
             await asyncio.sleep(0.25)
 
-            pid = read_patient_id_from_dyna(latest)
+            pinfo = read_patient_id_from_dyna(latest)
 
             delete_all_dyna_files(paths)
             last_batch_sig = sig
 
-            if pid:
+            if pinfo:
+                pid = pinfo["patient_id"]
+                save_patient_info(pinfo)
                 # ★ Phase 1: 切替ロジックを _do_patient_switch() に共通化
                 await _do_patient_switch(pid, create_new=False)
 
@@ -1138,12 +1147,16 @@ async def dyna_watch_task():
             await asyncio.sleep(1.0)
 
 # -------------------------
+# Web
+# -------------------------
+STATIC_DIR = resolve_relpath("static")
+app = FastAPI()
+app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+# -------------------------
 # データ表示
 # -------------------------
 SESSION_TXT_RE = re.compile(r"^(?P<patient_id>[^_]+)_(?P<stamp>\d{8}_\d{6})\.txt$")
-
-def _list_session_txt_files() -> list[Path]:
-    return sorted(OUTPUTS_DIR.glob("*.txt"))
 
 def _parse_session_name(name: str):
     m = SESSION_TXT_RE.match(name)
@@ -1227,6 +1240,37 @@ def list_patient_sessions(pid: str) -> list[dict]:
         })
     return result
 
+@app.get("/api/sessions")
+async def api_sessions():
+    """
+    Returns list of distinct sessions, now injecting patient_info
+    """
+    files = sorted(OUTPUTS_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    items = []
+    seen_pid = set()
+    for f in files:
+        info = _parse_session_name(f.name)
+        if not info:
+            continue
+        pid, stamp = info
+        if pid in seen_pid:
+            continue
+        seen_pid.add(pid)
+        date_str = f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}"
+        time_str = f"{stamp[9:11]}:{stamp[11:13]}"
+        
+        # Inject patient info
+        pinfo = get_patient_info(pid)
+
+        items.append({
+            "patient_id": pid,
+            "session_txt": f.name,
+            "date": date_str,
+            "time": time_str,
+            "patient_info": pinfo
+        })
+    return {"ok": True, "items": items}
+
 async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
     """
     患者切替の共通ロジック。
@@ -1245,7 +1289,7 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
     try:
         prev_jsonl = CURRENT.get("jsonl_path")
         if prev_jsonl:
-            enqueue_auto_llm_for_session(Path(prev_jsonl))
+            enqueue_auto_llm_for_jsonl(Path(prev_jsonl))
     except Exception as e:
         log(f"[AUTO_LLM] enqueue failed: {e}")
 
@@ -1289,6 +1333,7 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
         "jsonl_path": CURRENT["jsonl_path"],
         "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
         "resumed": resumed,
+        "patient_info": get_patient_info(pid)
     }, reset_states=True)
 
     return {
@@ -1299,11 +1344,9 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
     }
 
 # -------------------------
-# Web
+# Web (Definition moved up)
 # -------------------------
 STATIC_DIR = APP_DIR / "static"
-app = FastAPI()
-app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.get("/")
 async def index():
@@ -1315,6 +1358,7 @@ async def api_version():
 
 @app.on_event("startup")
 async def _startup():
+    load_patient_data()
     asyncio.create_task(dyna_watch_task())
 
     # Auto LLM worker（逐次キュー処理）
@@ -1326,6 +1370,13 @@ async def _startup():
 # -------------------------
 # LLM APIs
 # -------------------------
+@app.get("/api/patient/{pid}/info")
+async def api_patient_info(pid: str):
+    info = get_patient_info(pid)
+    if not info:
+        return JSONResponse({"ok": False, "error": "not found"}, status_code=404)
+    return {"ok": True, "patient_info": info}
+
 @app.get("/api/llm/models")
 async def api_llm_models():
     try:
@@ -2227,7 +2278,7 @@ async def ws_endpoint(ws: WebSocket):
         try:
             cur_jsonl = CURRENT.get("jsonl_path")
             if cur_jsonl:
-                enqueue_auto_llm_for_session(Path(cur_jsonl))
+                enqueue_auto_llm_for_jsonl(Path(cur_jsonl))
         except Exception as e:
             log(f"[AUTO_LLM] enqueue on stop failed: {e}")
 

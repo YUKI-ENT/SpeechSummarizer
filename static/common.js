@@ -20,6 +20,8 @@
   const hearingTextEl = document.getElementById('hearingText');
   const btnHearingToggle = document.getElementById('btnHearingToggle');
   const btnHearingClose = document.getElementById('btnHearingClose');
+  const btnZoomIn = document.getElementById('btnZoomIn');
+  const btnZoomOut = document.getElementById('btnZoomOut');
 
   const patientInputEl = document.getElementById('patientInput');
   const patientRecentListEl = document.getElementById('patientRecentList');
@@ -45,6 +47,8 @@
   let currentSessionTxt = '';   // 現在録音中 / 選択中のセッション(.txt)名
   let liveAsrText = '';   // ライブASRの累積テキスト
   let recentPatientIds = [];   // datalist用: 新しい順・重複なし
+  let hearingZoom = 1.0;
+
 
   // ===== ログ =====
   function log(s) {
@@ -84,11 +88,34 @@
         'aria-pressed',
         on ? 'true' : 'false'
       );
+
+    if (on) {
+      applyHearingZoom();
+    }
+  }
+
+  function applyHearingZoom() {
+    if (hearingTextEl) {
+      hearingTextEl.style.setProperty('--hearing-zoom', hearingZoom);
+    }
+  }
+
+  if (btnZoomIn) {
+    btnZoomIn.onclick = () => {
+      hearingZoom = Math.min(hearingZoom + 0.1, 3.0);
+      applyHearingZoom();
+    };
+  }
+  if (btnZoomOut) {
+    btnZoomOut.onclick = () => {
+      hearingZoom = Math.max(hearingZoom - 0.1, 0.5);
+      applyHearingZoom();
+    };
   }
 
   function updateHearingText(text) {
     if (!hearingTextEl) return;
-    const next = text || '(音声認識待機中)';
+    const next = text || '';
     // ユーザー編集中は上書きしない
     if (document.activeElement === hearingTextEl)
       return;
@@ -226,16 +253,23 @@
 
       const seen = new Set();
       recentPatientIds = [];
+      const pidToName = {};
 
       for (const it of items) {
         const pid = String(it?.patient_id || '').trim();
         if (!pid || seen.has(pid)) continue;
         seen.add(pid);
         recentPatientIds.push(pid);
+        if (it?.patient_info?.name) {
+          pidToName[pid] = it.patient_info.name;
+        }
       }
 
       patientRecentListEl.innerHTML = recentPatientIds
-        .map(pid => `<option value="${e_(pid)}"></option>`)
+        .map(pid => {
+          const name = pidToName[pid] ? ` ${e_(pidToName[pid])}` : '';
+          return `<option value="${e_(pid)}">${e_(pid)}${name}</option>`;
+        })
         .join('');
 
       log(`[patient] recent list loaded: ${recentPatientIds.length}`);
@@ -248,19 +282,71 @@
   async function loadPatientSessions(pid, opts = {}) {
     if (!pid) return;
     try {
-      const r = await fetch(`/api/patient/${encodeURIComponent(pid)}/sessions`);
-      const j = await r.json();
-      if (!j || !j.ok) throw new Error(j?.error || 'failed');
-      renderSidebar(pid, j.sessions || []);
-      renderTimeline(pid, j.sessions || [], opts);
+      // APIからセッションと患者情報を取得
+      const [rSessions, rInfo] = await Promise.all([
+        fetch(`/api/patient/${encodeURIComponent(pid)}/sessions`),
+        fetch(`/api/patient/${encodeURIComponent(pid)}/info`).then(res => res.ok ? res.json() : null).catch(() => null)
+      ]);
+      const jSessions = await rSessions.json();
+      if (!jSessions || !jSessions.ok) throw new Error(jSessions?.error || 'failed');
+
+      const pInfo = (rInfo && rInfo.ok) ? rInfo.patient_info : null;
+      renderSidebar(pid, jSessions.sessions || [], pInfo);
+      renderTimeline(pid, jSessions.sessions || [], opts);
     } catch (e) {
       log(`[patient] loadPatientSessions failed: ${e}`);
     }
   }
 
+  function calculateAge(dobString) {
+    if (!dobString) return '';
+    // Expected dobString format: yyyy/mm/dd or yyyy-mm-dd
+    const parts = dobString.split(/[\/\-]/);
+    if (parts.length !== 3) return '';
+    const birthDate = new Date(parts[0], parts[1] - 1, parts[2]);
+    const today = new Date();
+    let age = today.getFullYear() - birthDate.getFullYear();
+    const m = today.getMonth() - birthDate.getMonth();
+    if (m < 0 || (m === 0 && today.getDate() < birthDate.getDate())) {
+      age--;
+    }
+    return age;
+  }
+
+  function formatGender(g) {
+    if (g === '1') return '男';
+    if (g === '2') return '女';
+    return g || '-';
+  }
+
   // ===== サイドバー描画 =====
-  function renderSidebar(pid, sessions) {
+  function renderSidebar(pid, sessions, pInfo) {
     if (sidebarPidEl) sidebarPidEl.textContent = pid || '-';
+
+    // 患者情報の描画
+    const infoEl = document.getElementById('sidebarPatientInfo');
+    if (infoEl) {
+      if (pInfo) {
+        const _name = e_(pInfo.name) || '-';
+        const _gender = formatGender(pInfo.gender);
+        const _age = calculateAge(pInfo.dob);
+        const _ageStr = _age !== '' ? `${_age}歳` : '-';
+        const _dob = e_(pInfo.dob) || '-';
+
+        infoEl.innerHTML = `
+          <div class="info-row"><span class="info-label">患者ID</span><span class="info-val">${pid}</span></div>
+          <div class="info-row"><span class="info-label">氏名</span><span class="info-val">${_name}</span></div>
+          <div class="info-row"><span class="info-label">性別</span><span class="info-val">${_gender}</span></div>
+          <div class="info-row"><span class="info-label">生年月日</span><span class="info-val">${_dob}</span></div>
+          <div class="info-row"><span class="info-label">年齢</span><span class="info-val">${_ageStr}</span></div>
+        `;
+        infoEl.style.display = 'block';
+      } else {
+        infoEl.style.display = 'none';
+        infoEl.innerHTML = '';
+      }
+    }
+
     if (!sidebarListEl) return;
 
     if (!sessions.length) {
@@ -324,11 +410,10 @@
         });
       });
 
-      // LLM履歴クリックで内容ロード
-      card.querySelectorAll('.llm-history-item').forEach(el => {
-        el.addEventListener('click', async () => {
-          const llmFile = el.dataset.llmFile;
-          await loadLlmContent(card, session, llmFile);
+      // LLM履歴セレクトボックス変更
+      card.querySelectorAll('.llm-history-select').forEach(sel => {
+        sel.addEventListener('change', async () => {
+          await loadLlmContent(card, session, sel.value);
         });
       });
 
@@ -376,13 +461,13 @@
     //   3) LLM履歴がなければ何もしない
     karteTimeline.querySelectorAll('.karte-card').forEach(card => {
       const session = card.dataset.session;
-      const approvedEl = card.querySelector('.llm-history-item[data-approved="true"]');
-      const firstLlm = card.querySelector('.llm-history-item');
+      const approvedOpt = card.querySelector('.llm-history-select option[data-approved="true"]');
+      const latestOpt = card.querySelector('.llm-history-select option');
 
-      if (approvedEl) {
-        loadLlmContent(card, session, approvedEl.dataset.llmFile);
-      } else if (firstLlm && opts.autoShowLatest) {
-        loadLlmContent(card, session, firstLlm.dataset.llmFile);
+      if (approvedOpt) {
+        loadLlmContent(card, session, approvedOpt.value);
+      } else if (latestOpt && opts.autoShowLatest) {
+        loadLlmContent(card, session, latestOpt.value);
       }
     });
   }
@@ -397,20 +482,20 @@
     const badgeCls = isCurrent ? 'badge-current' : (approvedFile ? 'badge-approved' : 'badge-draft');
     const badgeLabel = isCurrent ? '● 録音中' : (approvedFile ? '✅ 確定済' : (llmFiles.length ? '📄 下書き' : '📝 ASRのみ'));
 
-    // LLMファイル一覧（ボタン群）
+    // LLMファイル一覧（セレクトボックス）
     let llmHistoryHtml = '';
     if (llmFiles.length) {
-      llmHistoryHtml = `<div class="llm-history-list">` +
+      llmHistoryHtml = `<select class="select select-sm llm-history-select">` +
         llmFiles.map(f => {
           const parts = f.split('__');
           const modelShort = (parts[1] || '').split(':')[0];
           const promptShort = parts[2] || '';
           const isApproved = (f === approvedFile);
-          return `<span class="llm-history-item ${isApproved ? 'llm-approved' : ''}"
-            data-llm-file="${e_(f)}" data-approved="${isApproved}"
-            title="${e_(f)}">${e_(modelShort)}/${e_(promptShort)}</span>`;
+          return `<option value="${e_(f)}" data-approved="${isApproved}" ${isApproved ? 'selected' : ''}>
+            ${e_(modelShort)}/${e_(promptShort)}${isApproved ? ' [確定]' : ''}
+          </option>`;
         }).join('') +
-        `</div>`;
+        `</select>`;
     }
 
     // 確定ボタン（承認前 & LLMあり のカードのみ）
@@ -449,15 +534,17 @@
         <button class="btn btn-sm btn-copy-asr" title="ASRテキストをコピー">Copy</button>
       </span>
     </summary>
-    <pre class="asr-text" id="asr-${e_(s.session_txt)}">(読み込み中…)</pre>
+    <pre class="asr-text" id="asr-${e_(s.session_txt)}" contenteditable="true" spellcheck="false">(読み込み中…)</pre>
   </details>
 
   <!-- LLM欄 -->
   <div class="llm-section">
     <div class="llm-section-hd">
-      <span class="llm-section-title">AI処理結果</span>
-      <div class="llm-tools">
+      <div class="llm-section-left">
+        <span class="llm-section-title">AI処理結果</span>
         ${llmHistoryHtml}
+      </div>
+      <div class="llm-tools">
         <select class="select select-sm card-sel-model">${modelOptions}</select>
         <select class="select select-sm card-sel-prompt">${promptOptions}</select>
         <button class="btn btn-primary btn-sm btn-llm-run">送信</button>
@@ -544,9 +631,8 @@
       preEl.textContent = j.summary || '(空)';
 
       // 選択ハイライト更新
-      card.querySelectorAll('.llm-history-item').forEach(el => {
-        el.classList.toggle('llm-selected', el.dataset.llmFile === llmFile);
-      });
+      const sel = card.querySelector('.llm-history-select');
+      if (sel) sel.value = llmFile;
 
       // 確定ボタンを対象ファイルに紐付け
       const approveBtn = card.querySelector('.btn-approve-cta');
@@ -602,20 +688,14 @@
       const j = await r.json();
       if (!j || !j.ok) return;
       const items = j.items || [];
-      const listEl = card.querySelector('.llm-history-list');
-      if (listEl) {
-        listEl.innerHTML = items.map(it => {
+      const selExt = card.querySelector('.llm-history-select');
+      if (selExt) {
+        selExt.innerHTML = items.map(it => {
           const parts = it.id.split('__');
           const modelShort = (parts[1] || '').split(':')[0];
           const promptShort = parts[2] || '';
-          return `<span class="llm-history-item" data-llm-file="${e_(it.id)}" title="${e_(it.id)}">${e_(modelShort)}/${e_(promptShort)}</span>`;
+          return `<option value="${e_(it.id)}">${e_(modelShort)}/${e_(promptShort)}</option>`;
         }).join('');
-        // 再バインド
-        listEl.querySelectorAll('.llm-history-item').forEach(el => {
-          el.addEventListener('click', async () => {
-            await loadLlmContent(card, sessionTxt, el.dataset.llmFile);
-          });
-        });
       }
       // 最新を自動表示
       if (items.length) await loadLlmContent(card, sessionTxt, items[0].id);
@@ -758,6 +838,13 @@
       if (patientInputEl && currentPatientId) patientInputEl.value = currentPatientId;
       resetLiveAsr();
       log('[patient_changed] ' + currentPatientId);
+
+      // Update sidebar immediately if patient_info is provided
+      if (msg.patient_info && currentPatientId) {
+        // fetch session details separately but we can tentatively render sidebar patient list if we had logic for it
+        // the simplest is to let loadPatientSessions completely rerender it below safely.
+      }
+
       loadPatientSessions(currentPatientId, { autoShowLatest: true })
         .then(() => loadAllCardAsrText());
     }

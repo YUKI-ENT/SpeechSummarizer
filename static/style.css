@@ -318,13 +318,13 @@ select.btn option {
 }
 
 /* アイコンボタン（マイクボタン風） */
-.btn.btn-icon{
+.btn.btn-icon {
   padding: 0 !important;
   width: 44px;
   min-width: 44px;
   height: 44px;
   border-radius: 50%;
-  border: 1px solid rgba(255,255,255,0.14);
+  border: 1px solid rgba(255, 255, 255, 0.14);
   display: inline-flex;
   align-items: center;
   justify-content: center;
@@ -332,27 +332,28 @@ select.btn option {
   flex-shrink: 0;
 }
 
-.btn.btn-icon .icon{
+.btn.btn-icon .icon {
   width: 22px;
   height: 22px;
-  color: rgba(255,255,255,0.80);
+  color: rgba(255, 255, 255, 0.80);
 }
 
-.btn.btn-icon[aria-pressed="true"]{
+.btn.btn-icon[aria-pressed="true"] {
   background: rgba(80, 170, 255, 0.18);
   border-color: rgba(80, 170, 255, 0.38);
 }
 
-.btn.btn-icon[aria-pressed="true"] .icon{
-  color: rgba(255,255,255,0.95);
+.btn.btn-icon[aria-pressed="true"] .icon {
+  color: rgba(255, 255, 255, 0.95);
 }
 
 /* 難聴オーバーレイの閉じるボタン配置 */
-.hearing-overlay{
-  position: fixed; /* 既存があるならそのまま */
+.hearing-overlay {
+  position: fixed;
+  /* 既存があるならそのまま */
 }
 
-.hearing-close{
+.hearing-close {
   position: absolute;
   top: 18px;
   right: 18px;
@@ -680,6 +681,32 @@ body.log-shown #btnToggleLog {
   font-size: 12px;
 }
 
+.sidebar-patient-info {
+  margin-top: 8px;
+  font-size: 13px;
+  line-height: 1.4;
+  color: var(--txt);
+  padding: 8px;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 8px;
+  border: 1px solid rgba(255, 255, 255, 0.05);
+}
+
+.sidebar-patient-info .info-row {
+  display: flex;
+  justify-content: space-between;
+  margin-bottom: 2px;
+}
+
+.sidebar-patient-info .info-label {
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.sidebar-patient-info .info-val {
+  font-weight: 600;
+}
+
 .sidebar-body {
   overflow-y: auto;
   padding: 6px 0;
@@ -871,10 +898,23 @@ body.log-shown #btnToggleLog {
 
 .llm-section-hd {
   display: flex;
+  justify-content: space-between;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 12px;
   margin-bottom: 8px;
+}
+
+.llm-section-left {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.llm-history-select {
+  background: rgba(255, 255, 255, 0.08) !important;
+  border-color: rgba(255, 255, 255, 0.15) !important;
+  min-width: 140px;
 }
 
 .llm-section-title {
@@ -970,29 +1010,35 @@ body.log-shown .log-card {
   position: fixed;
   inset: 0;
   z-index: 200;
-  background: rgba(0, 0, 0, 0.88);
+  background: rgba(0, 0, 0, 0.92);
+  flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 40px;
+  padding: 110px 40px 40px;
+  /* 上部にボタン用のスペースを確保 */
 }
 
 .hearing-overlay.visible {
   display: flex;
 }
 
-.hearing-text{
-  width: min(1200px, 100%);
-  height: min(80vh, 900px);
+.hearing-text {
+  width: min(1300px, 100%);
+  height: min(75vh, 1000px);
+  flex: 1;
+  /* 残りのスペースを埋める */
 
-  font-size: clamp(28px, 5vw, 84px);
+  /* ズーム対応 */
+  --hearing-zoom: 1.0;
+  font-size: calc(clamp(32px, 6vw, 90px) * var(--hearing-zoom));
   line-height: 1.5;
   font-weight: 700;
 
   color: #fff;
-  background: transparent;
-  border: 1px solid rgba(255,255,255,0.14);
-  border-radius: 18px;
-  padding: 18px 20px;
+  background: rgba(255, 255, 255, 0.03);
+  border: 1px solid rgba(255, 255, 255, 0.12);
+  border-radius: 20px;
+  padding: 30px;
 
   outline: none;
   resize: none;
@@ -1002,14 +1048,78 @@ body.log-shown .log-card {
   appearance: none;
   -webkit-appearance: none;
 
-  /* div時代の名残を調整 */
-  text-align: left;       /* 編集しやすい */
-  white-space: pre-wrap;  /* 改行維持 */
-  text-shadow: 0 2px 20px rgba(0,0,0,0.8);
+  text-align: left;
+  white-space: pre-wrap;
+  text-shadow: 0 2px 20px rgba(0, 0, 0, 0.8);
 }
-.hearing-text:focus{
-  border-color: rgba(80,170,255,0.55);
-  box-shadow: 0 0 0 4px rgba(80,170,255,0.16);
+
+.hearing-zoom-controls {
+  position: absolute;
+  top: 25px;
+  left: 50%;
+  transform: translateX(-50%);
+  display: flex;
+  align-items: center;
+  gap: 24px;
+  z-index: 210;
+  background: rgba(20, 20, 40, 0.6);
+  padding: 10px 28px;
+  border-radius: 50px;
+  border: 1px solid rgba(255, 255, 255, 0.2);
+  backdrop-filter: blur(15px);
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.6);
+}
+
+.btn-zoom {
+  width: 54px;
+  height: 54px;
+  padding: 0 !important;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 32px !important;
+  font-weight: bold;
+  background: rgba(255, 255, 255, 0.1) !important;
+  border-radius: 50% !important;
+  border: 1px solid rgba(255, 255, 255, 0.25) !important;
+  transition: all 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+  color: #fff;
+}
+
+.btn-zoom:hover {
+  background: rgba(255, 255, 255, 0.25) !important;
+  transform: scale(1.15);
+  border-color: rgba(255, 255, 255, 0.5) !important;
+  box-shadow: 0 0 15px rgba(255, 255, 255, 0.2);
+}
+
+.hearing-close {
+  position: absolute;
+  top: 30px;
+  right: 30px;
+  z-index: 210;
+  height: 48px;
+  padding: 0 32px !important;
+  border-radius: 24px !important;
+  background: rgba(230, 60, 60, 0.3) !important;
+  border: 1px solid rgba(230, 60, 60, 0.4) !important;
+  color: #fff !important;
+  font-size: 16px !important;
+  font-weight: 700 !important;
+  backdrop-filter: blur(12px);
+  transition: all 0.2s;
+  box-shadow: 0 4px 15px rgba(230, 60, 60, 0.2);
+}
+
+.hearing-close:hover {
+  background: rgba(230, 60, 60, 0.5) !important;
+  transform: scale(1.05);
+  box-shadow: 0 6px 20px rgba(230, 60, 60, 0.4);
+}
+
+.hearing-text:focus {
+  border-color: rgba(80, 170, 255, 0.55);
+  box-shadow: 0 0 0 4px rgba(80, 170, 255, 0.16);
 }
 
 /* --- Responsive (Phase 1) --- */
