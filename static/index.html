@@ -23,14 +23,8 @@
     <div class="nav-center">
       <div class="patient-input-group">
         <span class="nav-label">カルテNo:</span>
-        <input
-          type="text"
-          id="patientInput"
-          class="patient-input"
-          list="patientRecentList"
-          placeholder="カルテNoを入力 / 選択"
-          autocomplete="off"
-        >
+        <input type="text" id="patientInput" class="patient-input" list="patientRecentList" placeholder="カルテNoを入力 / 選択"
+          autocomplete="off">
         <datalist id="patientRecentList"></datalist>
         <button id="btnSwitchPatient" class="btn btn-sm" type="button">表示</button>
       </div>
@@ -53,44 +47,31 @@
       </button>
 
       <!-- ログ -->
-      <button class="btn btn-icon"
-              id="btnToggleLog"
-              aria-pressed="false"
-              title="ログ表示">
+      <button class="btn btn-icon" id="btnToggleLog" aria-pressed="false" title="ログ表示">
 
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          <rect x="4" y="3" width="16" height="18" rx="2"
-                stroke="currentColor"
-                stroke-width="2"
-                fill="none"/>
-          <path d="M8 7h8M8 11h8M8 15h6"
-                stroke="currentColor"
-                stroke-width="2"
-                stroke-linecap="round"/>
+          <rect x="4" y="3" width="16" height="18" rx="2" stroke="currentColor" stroke-width="2" fill="none" />
+          <path d="M8 7h8M8 11h8M8 15h6" stroke="currentColor" stroke-width="2" stroke-linecap="round" />
         </svg>
       </button>
 
       <!-- 難聴モード -->
-      <button class="btn btn-icon"
-              id="btnHearingToggle"
-              aria-pressed="false"
-              title="字幕（難聴）モード">
+      <button class="btn btn-icon" id="btnHearingToggle" aria-pressed="false" title="字幕（難聴）モード">
 
         <svg class="icon" viewBox="0 0 24 24" aria-hidden="true">
-          <path d="M4 9v6h4l5 4V5L8 9H4z"
-                fill="currentColor"/>
-          <path d="M16 9a3 3 0 0 1 0 6"
-                stroke="currentColor"
-                stroke-width="2"
-                fill="none"
-                stroke-linecap="round"/>
-          <path d="M18 7a6 6 0 0 1 0 10"
-                stroke="currentColor"
-                stroke-width="2"
-                fill="none"
-                stroke-linecap="round"/>
+          <!-- Ear shape -->
+          <g transform="matrix(0.8 0 0 0.8 0 2)" fill="none" stroke="currentColor" stroke-width="2.5"
+            stroke-linecap="round" stroke-linejoin="round">
+            <path
+              d="M6 8.5a6.5 6.5 0 1 1 13 0c0 4-6 3-6 8.5v1a2.5 2.5 0 1 1-5 0v-1c0-1.6 1.4-3 1.4-3.5a1.5 1.5 0 1 0-3-.5" />
+            <path d="M8 8.5a1.5 1.5 0 1 1 3 0c0 1.5-3 1-3 3.5" />
+          </g>
+          <!-- Sound waves -->
+          <path d="M16 9a3 3 0 0 1 0 6" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" />
+          <path d="M18 7a6 6 0 0 1 0 10" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" />
+          <path d="M20 5a9 9 0 0 1 0 14" stroke="currentColor" stroke-width="2" fill="none" stroke-linecap="round" />
         </svg>
-      </button>    
+      </button>
     </div>
   </div>
 
@@ -98,23 +79,12 @@
   <!-- 難聴モード字幕 -->
   <div id="hearingOverlay" class="hearing-overlay">
 
-    <button
-      id="btnHearingClose"
-      class="btn hearing-close"
-      type="button"
-      title="難聴モードを終了"
-    >
+    <button id="btnHearingClose" class="btn hearing-close" type="button" title="難聴モードを終了">
       終了
     </button>
 
-    <textarea
-      id="hearingText"
-      class="hearing-text"
-      spellcheck="false"
-      autocomplete="off"
-      autocapitalize="off"
-      rows="6"
-    ></textarea>
+    <textarea id="hearingText" class="hearing-text" spellcheck="false" autocomplete="off" autocapitalize="off"
+      rows="6"></textarea>
 
   </div>
 
@@ -178,4 +148,5 @@
   <script src="/static/common.js"></script>
 
 </body>
+
 </html>
