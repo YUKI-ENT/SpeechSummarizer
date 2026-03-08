@@ -644,14 +644,14 @@ def _has_llm_history_for_prompt(jsonl_path: Path, *, prompt_id: str) -> bool:
     except Exception:
         return False
     
-def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str = "switch"):
+def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str = "switch") -> int:
     """
     セッション終了（患者切替など）タイミングで、当該セッションのjsonlを自動でLLMに投げる。
     """
     global _auto_llm_q, _auto_llm_enqueued
 
     if not AUTO_LLM_ENABLED:
-        return
+        return 0
     if _auto_llm_q is None:
         # startup前に呼ばれても落ちないように
         _auto_llm_q = asyncio.Queue()
@@ -661,14 +661,15 @@ def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str = "switch"):
 
     # ★追加：存在しないなら何もしない
     if not jsonl_path.exists():
-        return
+        return 0
     # ★追加：メモリ内ガード（同じjsonlを多重enqueueしない）
     key = str(jsonl_path.resolve())
     if key in _auto_llm_enqueued:
-        return
+        return 0
     _auto_llm_enqueued.add(key)
 
     # promptsを正規化して順番にqueueへ
+    queued = 0
     for raw in AUTO_LLM_PROMPTS:
         it = _normalize_auto_llm_item(raw)
         if not it:
@@ -686,6 +687,9 @@ def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str = "switch"):
             "reason": reason,
             **it,  # model_id, prompt_id, asr_correct
         })
+        queued += 1
+
+    return queued
 
 async def _auto_llm_worker():
     """
@@ -711,15 +715,26 @@ async def _run_auto_llm_job(job: dict):
     model_id = str(job["model_id"])
     prompt_id = str(job["prompt_id"])
     asr_correct = bool(job.get("asr_correct", False))
+    txt_path = jsonl_path.with_suffix(".txt")
 
     if not jsonl_path.exists():
         return
 
     # JSONLからASRテキストを復元（qualityフィルタも効くやつ）
     # 既存関数：collect_asr_text_from_jsonl :contentReference[oaicite:2]{index=2}
-    asr_text = collect_asr_text_from_jsonl(jsonl_path, min_quality="good")
-    asr_text = (asr_text or "").strip()
+    if asr_correct and txt_path.exists():
+        asr_text = txt_path.read_text(encoding="utf-8", errors="replace").strip()
+        if asr_text:
+            log(f"[AUTO_LLM] using txt transcript for correction: {txt_path.name}")
+    else:
+        asr_text = collect_asr_text_from_jsonl(jsonl_path, min_quality="good")
+        asr_text = (asr_text or "").strip()
+        if not asr_text and txt_path.exists():
+            asr_text = txt_path.read_text(encoding="utf-8", errors="replace").strip()
+            if asr_text:
+                log(f"[AUTO_LLM] fallback to txt transcript: {txt_path.name}")
     if not asr_text:
+        log(f"[AUTO_LLM] skip empty transcript jsonl={jsonl_path.name}")
         return
 
     # ASR補正（必要なら）
@@ -1515,8 +1530,14 @@ async def api_auto_llm_enqueue_current():
     if not jsonl_path.exists():
         return {"ok": True, "enqueued": False, "reason": "jsonl_not_found"}
 
-    enqueue_auto_llm_for_jsonl(jsonl_path, reason="recording_stop")
-    return {"ok": True, "enqueued": True, "jsonl": jsonl_path.name}
+    queued = enqueue_auto_llm_for_jsonl(jsonl_path, reason="recording_stop")
+    return {
+        "ok": True,
+        "enqueued": queued > 0,
+        "queued": queued,
+        "reason": None if queued > 0 else "no_jobs",
+        "jsonl": jsonl_path.name,
+    }
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
@@ -1721,6 +1742,71 @@ def api_session_get(name: str):
             log(f"[SESSION] jsonl read failed: {j}: {e}")
 
     return {"name": name, "patient_id": patient_id, "stamp": stamp, "text": text, "meta": meta}
+
+@app.post("/api/session/transcript")
+async def api_session_transcript(payload: Dict[str, Any] = Body(...)):
+    session_txt = (payload.get("session") or "").strip()
+    text = payload.get("text")
+
+    if not isinstance(text, str):
+        return JSONResponse({"ok": False, "error": "text must be string"}, status_code=400)
+    if len(text) > 50000:
+        return JSONResponse({"ok": False, "error": "text too large"}, status_code=413)
+
+    if session_txt:
+        info = _parse_session_name(session_txt)
+        if not info:
+            return JSONResponse({"ok": False, "error": "invalid session name"}, status_code=400)
+        txt_path = (OUTPUTS_DIR / session_txt).resolve()
+        jsonl_path = (OUTPUTS_DIR / session_txt.replace(".txt", ".jsonl")).resolve()
+    else:
+        if not CURRENT.get("text_path") or not CURRENT.get("jsonl_path"):
+            return JSONResponse({"ok": False, "error": "no current session"}, status_code=400)
+        txt_path = Path(CURRENT["text_path"]).resolve()
+        jsonl_path = Path(CURRENT["jsonl_path"]).resolve()
+        session_txt = txt_path.name
+
+    if OUTPUTS_DIR.resolve() not in txt_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+    if OUTPUTS_DIR.resolve() not in jsonl_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+    if not jsonl_path.exists():
+        return JSONResponse({"ok": False, "error": "jsonl not found"}, status_code=404)
+
+    before_text = ""
+    if txt_path.exists():
+        before_text = txt_path.read_text(encoding="utf-8", errors="replace")
+
+    normalized = text.strip()
+    stored_text = normalized + ("\n" if normalized else "")
+    if before_text == stored_text:
+        return {"ok": True, "changed": False, "text": normalized}
+
+    try:
+        txt_path.parent.mkdir(parents=True, exist_ok=True)
+        txt_path.write_text(stored_text, encoding="utf-8")
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"write txt failed: {e}"}, status_code=500)
+
+    try:
+        append_jsonl_line(jsonl_path, {
+            "type": "transcript_update",
+            "ts": datetime.datetime.now().isoformat(),
+            "session_txt": session_txt,
+            "source": "hearing_edit",
+            "before_sha1": _sha1_text(before_text),
+            "after_sha1": _sha1_text(stored_text),
+            "chars": len(normalized),
+        })
+    except Exception:
+        pass
+
+    try:
+        await broadcast({"type": "transcript_updated", "session_txt": session_txt, "text": normalized})
+    except Exception:
+        pass
+
+    return {"ok": True, "changed": True, "text": normalized}
 
 RESUME_MARK_RE = re.compile(r"^====\s*\d{4}/\d{2}/\d{2}\s+\d{2}:\d{2}:\d{2}\s+再開\s*====\s*$")
 

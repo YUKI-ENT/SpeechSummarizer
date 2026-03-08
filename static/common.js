@@ -48,6 +48,10 @@
   let liveAsrText = '';   // ライブASRの累積テキスト
   let recentPatientIds = [];   // 新しい順・重複なし
   let hearingZoom = 1.0;
+  let suppressHearingInput = false;
+  let hearingSaveTimer = null;
+  let hearingLastSavedSession = '';
+  let hearingLastSavedText = '';
 
 
   // ===== ログ =====
@@ -100,6 +104,51 @@
     }
   }
 
+  function syncCurrentCardAsr(text) {
+    if (!currentSessionTxt || !karteTimeline) return;
+    const preEl = karteTimeline.querySelector(`#asr-${CSS.escape(currentSessionTxt)}`);
+    if (preEl) preEl.textContent = text;
+  }
+
+  async function saveHearingTranscript(sessionTxt, text) {
+    const normalized = (text || '').trim();
+    if (!sessionTxt) return;
+    if (sessionTxt === hearingLastSavedSession && normalized === hearingLastSavedText) return;
+    try {
+      const r = await fetch('/api/session/transcript', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ session: sessionTxt, text: normalized })
+      });
+      const j = await r.json();
+      if (!j.ok) throw new Error(j.error || String(r.status));
+      hearingLastSavedSession = sessionTxt;
+      hearingLastSavedText = normalized;
+    } catch (e) {
+      log(`[hearing] save failed: ${e}`);
+    }
+  }
+
+  function scheduleHearingTranscriptSave() {
+    if (!hearingTextEl || !currentSessionTxt) return;
+    const sessionTxt = currentSessionTxt;
+    const text = hearingTextEl.value || '';
+    clearTimeout(hearingSaveTimer);
+    hearingSaveTimer = setTimeout(() => {
+      hearingSaveTimer = null;
+      saveHearingTranscript(sessionTxt, text);
+    }, 800);
+  }
+
+  async function flushHearingTranscriptSave() {
+    if (hearingSaveTimer) {
+      clearTimeout(hearingSaveTimer);
+      hearingSaveTimer = null;
+    }
+    if (!hearingTextEl || !currentSessionTxt) return;
+    await saveHearingTranscript(currentSessionTxt, hearingTextEl.value || '');
+  }
+
   if (btnZoomIn) {
     btnZoomIn.onclick = () => {
       hearingZoom = Math.min(hearingZoom + 0.1, 3.0);
@@ -113,23 +162,54 @@
     };
   }
 
+  if (hearingTextEl) {
+    hearingTextEl.addEventListener('input', () => {
+      if (suppressHearingInput) return;
+      liveAsrText = hearingTextEl.value || '';
+      syncCurrentCardAsr(liveAsrText);
+      scheduleHearingTranscriptSave();
+    });
+    hearingTextEl.addEventListener('blur', () => {
+      flushHearingTranscriptSave();
+    });
+  }
+
   function updateHearingText(text) {
     if (!hearingTextEl) return;
     const next = text || '';
-    // ユーザー編集中は上書きしない
-    if (document.activeElement === hearingTextEl)
+    // 同一内容なら何もしない
+    if (hearingTextEl.value === next)
       return;
+    const isFocused = document.activeElement === hearingTextEl;
+    const prevLength = hearingTextEl.value.length;
+    const selStart = isFocused ? hearingTextEl.selectionStart : null;
+    const selEnd = isFocused ? hearingTextEl.selectionEnd : null;
     // 下端にいる場合のみ自動スクロール
     const nearBottom =
       hearingTextEl.scrollHeight -
       hearingTextEl.scrollTop -
       hearingTextEl.clientHeight < 80;
 
-    hearingTextEl.value = next;
+    const prevScrollTop = hearingTextEl.scrollTop;
+    suppressHearingInput = true;
+    try {
+      hearingTextEl.value = next;
 
-    if (nearBottom) {
-      hearingTextEl.scrollTop =
-        hearingTextEl.scrollHeight;
+      if (nearBottom) {
+        hearingTextEl.scrollTop =
+          hearingTextEl.scrollHeight;
+      } else {
+        hearingTextEl.scrollTop = prevScrollTop;
+      }
+
+      if (isFocused && selStart !== null && selEnd !== null) {
+        const appended = Math.max(0, next.length - prevLength);
+        const nextSelStart = Math.min(next.length, selStart + appended);
+        const nextSelEnd = Math.min(next.length, selEnd + appended);
+        hearingTextEl.setSelectionRange(nextSelStart, nextSelEnd);
+      }
+    } finally {
+      suppressHearingInput = false;
     }
   }
 
@@ -812,14 +892,13 @@
     updateHearingText(liveAsrText);
 
     // 現在セッションカードのASR欄を更新
-    if (currentSessionTxt && karteTimeline) {
-      const preEl = karteTimeline.querySelector(`#asr-${CSS.escape(currentSessionTxt)}`);
-      if (preEl) preEl.textContent = liveAsrText;
-    }
+    syncCurrentCardAsr(liveAsrText);
   }
 
   function resetLiveAsr() {
     liveAsrText = '';
+    hearingLastSavedSession = currentSessionTxt || '';
+    hearingLastSavedText = '';
     updateHearingText('(音声認識待機中)');
   }
 
@@ -866,6 +945,18 @@
 
     if (msg.type === 'asr') {
       if (msg.text) appendLiveAsr(msg.text);
+    }
+
+    if (msg.type === 'corrected' || msg.type === 'rebuilt' || msg.type === 'transcript_updated') {
+      if (!msg.session_txt) return;
+      if (msg.session_txt === currentSessionTxt) {
+        liveAsrText = msg.text || '';
+        hearingLastSavedSession = msg.session_txt;
+        hearingLastSavedText = liveAsrText.trim();
+        updateHearingText(liveAsrText || '(音声認識待機中)');
+      }
+      const preEl = karteTimeline?.querySelector(`#asr-${CSS.escape(msg.session_txt)}`);
+      if (preEl) preEl.textContent = msg.text || '';
     }
   }
 
@@ -960,6 +1051,8 @@
         } catch (e) { }
       }
       liveAsrText = existingAsr;
+      hearingLastSavedSession = currentSessionTxt || '';
+      hearingLastSavedText = existingAsr;
       updateHearingText(liveAsrText || '(音声認識待機中)');
 
       log('recording start');
@@ -970,6 +1063,7 @@
 
   async function stopRecording() {
     try {
+      await flushHearingTranscriptSave();
       if (procNode) procNode.disconnect();
       if (srcNode) srcNode.disconnect();
       if (audioCtx) await audioCtx.close();
@@ -985,6 +1079,8 @@
         const j = await r.json();
         if (j?.ok && j.enqueued) {
           log(`[auto_llm] enqueued on stop: ${j.jsonl || ''}`);
+        } else if (j?.ok) {
+          log(`[auto_llm] not enqueued on stop: ${j?.reason || 'skipped'} queued=${j?.queued ?? 0}`);
         }
       } catch (e) {
         log(`[auto_llm] enqueue on stop failed: ${e}`);

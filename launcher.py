@@ -89,6 +89,7 @@ class LauncherApp:
         self.vars: dict[str, tk.Variable] = {}
         self.field_meta: dict[str, dict] = {}
         self.model_rows: list[tuple[tk.StringVar, tk.StringVar]] = []
+        self.prompt_rows: list[tuple[tk.StringVar, tk.StringVar, ScrolledText]] = []
 
         self.cfg = load_config()
         self._build_ui()
@@ -220,6 +221,7 @@ class LauncherApp:
     def _build_llm_tab(self, parent: ttk.Frame) -> None:
         for i in range(4):
             parent.columnconfigure(i, weight=1)
+        parent.rowconfigure(4, weight=1)
 
         row = 0
         self._add_entry(parent, "llm_host", "Host", ("llm", "host"), kind="str", row=row, width=32)
@@ -241,6 +243,32 @@ class LauncherApp:
         self._add_entry(auto_box, "auto_llm_model_id", "Model ID", ("auto_llm_prompts", "0", "model_id"), kind="str", row=0, width=20)
         self._add_entry(auto_box, "auto_llm_prompt_id", "Prompt ID", ("auto_llm_prompts", "0", "prompt_id"), kind="str", row=1, width=20)
         self._add_bool(auto_box, "auto_llm_asr_correct", "ASR補正後に送る", ("auto_llm_prompts", "0", "asr_correct"), row=2)
+        row += 1
+
+        prompt_box = ttk.LabelFrame(parent, text="LLM Prompt一覧", padding=10)
+        prompt_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        prompt_box.columnconfigure(2, weight=1)
+
+        ttk.Label(prompt_box, text="Prompt ID").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
+        ttk.Label(prompt_box, text="Label").grid(row=0, column=1, sticky="w", padx=(0, 8), pady=(0, 6))
+        ttk.Label(prompt_box, text="Template").grid(row=0, column=2, sticky="w", pady=(0, 6))
+
+        prompt_cfg = get_nested(self.cfg, ("llm", "prompts"), {}) or {}
+        row_idx = 1
+        for prompt_id, prompt_meta in prompt_cfg.items():
+            label = ""
+            template = ""
+            if isinstance(prompt_meta, dict):
+                label = str(prompt_meta.get("label", ""))
+                template = str(prompt_meta.get("template", ""))
+            self._add_prompt_row_widgets(prompt_box, row_idx, str(prompt_id), label, template)
+            row_idx += 1
+
+        self.prompt_box = prompt_box
+
+        btn_row = ttk.Frame(prompt_box)
+        btn_row.grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=(8, 0))
+        ttk.Button(btn_row, text="追加", command=self.add_prompt_row).pack(side="left")
 
     def _build_log_tab(self, parent: ttk.Frame) -> None:
         self.log_text = ScrolledText(parent, height=30, wrap="word")
@@ -314,6 +342,21 @@ class LauncherApp:
             width=8,
         ).grid(row=row_idx, column=2, sticky="w", pady=4)
 
+    def _add_prompt_row_widgets(self, parent, row_idx: int, prompt_id: str = "", label: str = "", template: str = "") -> None:
+        id_var = tk.StringVar(value=prompt_id)
+        label_var = tk.StringVar(value=label)
+        text = ScrolledText(parent, height=6, wrap="word")
+        text.insert("1.0", template)
+        self.prompt_rows.append((id_var, label_var, text))
+
+        ttk.Entry(parent, textvariable=id_var, width=18).grid(row=row_idx, column=0, sticky="we", padx=(0, 8), pady=4)
+        ttk.Entry(parent, textvariable=label_var, width=20).grid(row=row_idx, column=1, sticky="we", padx=(0, 8), pady=4)
+        text.grid(row=row_idx, column=2, sticky="nsew", pady=4)
+
+    def add_prompt_row(self) -> None:
+        row_idx = len(self.prompt_rows) + 1
+        self._add_prompt_row_widgets(self.prompt_box, row_idx)
+
     def _load_form_from_config(self) -> None:
         self.cfg = load_config()
         for name, field in self.field_meta.items():
@@ -346,6 +389,25 @@ class LauncherApp:
         for idx in range(len(model_cfg), len(self.model_rows)):
             self.model_rows[idx][0].set("")
             self.model_rows[idx][1].set("")
+
+        prompt_cfg = get_nested(self.cfg, ("llm", "prompts"), {}) or {}
+        prompt_items = list(prompt_cfg.items())
+        for idx, (prompt_id, prompt_meta) in enumerate(prompt_items):
+            if idx >= len(self.prompt_rows):
+                self.add_prompt_row()
+            label = ""
+            template = ""
+            if isinstance(prompt_meta, dict):
+                label = str(prompt_meta.get("label", ""))
+                template = str(prompt_meta.get("template", ""))
+            self.prompt_rows[idx][0].set(str(prompt_id))
+            self.prompt_rows[idx][1].set(label)
+            self.prompt_rows[idx][2].delete("1.0", "end")
+            self.prompt_rows[idx][2].insert("1.0", template)
+        for idx in range(len(prompt_items), len(self.prompt_rows)):
+            self.prompt_rows[idx][0].set("")
+            self.prompt_rows[idx][1].set("")
+            self.prompt_rows[idx][2].delete("1.0", "end")
 
     def reload_form(self) -> None:
         self._load_form_from_config()
@@ -397,6 +459,28 @@ class LauncherApp:
                 raise ValueError("asr.model_id が空です。")
             if get_nested(cfg, ("asr", "model_id")) not in models:
                 raise ValueError("asr.model_id が asr.models に存在しません。")
+
+            prompts: dict[str, dict[str, str]] = {}
+            for prompt_id_var, label_var, template_widget in self.prompt_rows:
+                prompt_id = prompt_id_var.get().strip()
+                label = label_var.get().strip()
+                template = template_widget.get("1.0", "end").strip()
+                if not prompt_id and not label and not template:
+                    continue
+                if not prompt_id:
+                    raise ValueError("LLM prompt の Prompt ID は必須です。")
+                if not label:
+                    raise ValueError(f"LLM prompt '{prompt_id}' の label は必須です。")
+                if not template:
+                    raise ValueError(f"LLM prompt '{prompt_id}' の template は必須です。")
+                prompts[prompt_id] = {"label": label, "template": template}
+            set_nested(cfg, ("llm", "prompts"), prompts)
+
+            default_prompt_id = get_nested(cfg, ("llm", "default_prompt_id"), "").strip()
+            if not default_prompt_id:
+                raise ValueError("llm.default_prompt_id は必須です。")
+            if default_prompt_id not in prompts:
+                raise ValueError("llm.default_prompt_id が llm.prompts に存在しません。")
 
             save_config(cfg)
             self.cfg = cfg
