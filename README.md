@@ -14,13 +14,13 @@ SpeechSummarizer は、医療現場向けに設計されたリアルタイム音
 
 ## 🎥 紹介動画
 
-[![SpeechSummarizer Demo](https://img.youtube.com/vi/pZM9rbGqX3A/maxresdefault.jpg)](https://youtu.be/pZM9rbGqX3A)
+[![SpeechSummarizer Demo](https://img.youtube.com/vi/ujOWRbY5qK4/maxresdefault.jpg)](https://youtu.be/ujOWRbY5qK4)
 
 ## インストール方法
 
 ### 【Windows版（EXE）】
 
-1. release の zip をダウンロード
+1. release の zip をダウンロード（ファイル名に`NoModels`が入っているものはASRモデルなし、無印のものはsmallのModelファイルが同梱されています）
 2. 任意のフォルダに展開
 
   フォルダ構成例：
@@ -54,7 +54,7 @@ pip install -r requirements.txt
 
 ※ Linux環境では、CUDAランタイムをシステムにインストールするとドライババージョンや他のアプリケーションと干渉し起動できなくなることがあるので、下記の[【補足】GPU (CUDA) 利用方法（Linux）](https://github.com/YUKI-ENT/SpeechSummarizer/edit/main/README.md#%E8%A3%9C%E8%B6%B3gpu-cuda-%E5%88%A9%E7%94%A8%E6%96%B9%E6%B3%95linux) を推奨します。
 
-## config.jsonの設定
+## config.jsonの設定（Windows版ではGUIから編集可能）
 インストールフォルダに有る`config.json.sample`を`config.json`に名前を変えるかコピーし、環境に合わせて編集します。
 
 必須の項目は、
@@ -138,8 +138,10 @@ pip install -r requirements.txt
 ## 起動方法
 ### Windows Exe版
 - SpeechSummarizer.exeをクリックし、起動に成功すると下記のような表示になります
-  ![スクリーンショット 2026-02-18 115919](https://github.com/user-attachments/assets/831438fd-9726-43ac-b048-bab42003ec99)
-- この画面が表示されない場合は、`config.json` 等の設定を見直し、一度**コマンドプロンプト**や **powershell**から実行してみて、エラーメッセージを確認してみてください。
+  <img width="1042" height="852" alt="image" src="https://github.com/user-attachments/assets/1eed7ffc-6148-4ae4-839c-3d32d1d61bab" />
+
+- 設定をした後、`サーバー起動`クリックでサーバーが起動します
+- この画面が表示されない場合は、**コマンドプロンプト**や **powershell**から実行してみて、エラーメッセージを確認してみてください。
 - Visual C++ 再頒布可能パッケージが必要になるケースもあります。その場合は、https://aka.ms/vc14/vc_redist.x64.exe からダウンロード、インストールを行ってください。
 
 ### Python版
@@ -165,9 +167,8 @@ pip install -r requirements.txt
   https://(サーバーアドレス):8000
 
   で画面が立ち上がります。
-
-  ![スクリーンショット 2026-02-18 120922](https://github.com/user-attachments/assets/f72fad23-cc97-4266-aaa9-fa281dba0e8f)
-
+  
+  <img width="918" height="758" alt="名称未設定" src="https://github.com/user-attachments/assets/d33551cd-f395-49a0-adeb-9d233ac5112e" />
 
 # 【補足】GPU (CUDA) 利用方法（Linux）  
   
