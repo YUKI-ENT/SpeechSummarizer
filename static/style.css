@@ -206,7 +206,8 @@ select.btn option {
   z-index: 100;
 
   display: grid;
-  grid-template-columns: 1fr auto 1fr;
+  grid-template-columns: auto 1fr auto;
+  grid-template-areas: "brand center right";
   align-items: center;
   gap: 12px;
 
@@ -220,6 +221,7 @@ select.btn option {
 }
 
 .brand {
+  grid-area: brand;
   display: flex;
   align-items: baseline;
   gap: 10px;
@@ -244,14 +246,17 @@ select.btn option {
 }
 
 .nav-center {
+  grid-area: center;
   display: flex;
   gap: 12px;
   align-items: center;
-  justify-content: center;
+  justify-content: flex-start;
   flex-wrap: wrap;
+  min-width: 0;
 }
 
 .nav-right {
+  grid-area: right;
   display: flex;
   gap: 8px;
   /* ★ 10→8px に縮小 */
@@ -616,6 +621,7 @@ body.hearing textarea.transcript {
   align-items: center;
   gap: 8px;
   flex-wrap: nowrap;
+  min-width: 0;
 }
 
 .nav-label {
@@ -631,14 +637,62 @@ body.hearing textarea.transcript {
   border-radius: 10px;
   padding: 8px 12px;
   font-size: 14px;
-  width: 160px;
-  min-width: 160px;
+  width: 10ch;
+  min-width: 9ch;
   outline: none;
   transition: border-color .2s;
 }
 
+.patient-select {
+  background: rgba(0, 0, 0, 0.32);
+  border: 1px solid rgba(255, 255, 255, 0.18);
+  color: #fff;
+  border-radius: 10px;
+  padding: 8px 12px;
+  font-size: 14px;
+  width: clamp(140px, 19vw, 220px);
+  min-width: 140px;
+  outline: none;
+  transition: border-color .2s;
+}
+
+.patient-select:focus {
+  border-color: rgba(80, 170, 255, 0.6);
+}
+
 .patient-input:focus {
   border-color: rgba(80, 170, 255, 0.6);
+}
+
+/* --- Responsive nav: avoid overlap between center and right controls --- */
+@media (max-width: 1400px) {
+  .nav {
+    grid-template-columns: 1fr auto;
+    grid-template-areas:
+      "brand right"
+      "center center";
+    height: auto;
+    row-gap: 8px;
+  }
+
+  .brand {
+    grid-area: brand;
+  }
+
+  .nav-right {
+    grid-area: right;
+    justify-content: flex-end;
+    flex-wrap: wrap;
+  }
+
+  .nav-center {
+    grid-area: center;
+    justify-content: flex-start;
+  }
+
+  body {
+    --page-top: 128px;
+  }
 }
 
 /* --- メインレイアウト: サイドバー + タイムライン + ログ --- */
@@ -973,13 +1027,13 @@ body.log-shown #btnToggleLog {
 }
 
 .btn-approve-cta {
-  background: rgba(80, 200, 120, 0.18);
-  border-color: rgba(80, 200, 120, 0.35);
-  color: #7de0a0;
+  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(255, 255, 255, 0.20);
+  color: rgba(255, 255, 255, 0.92);
 }
 
 .btn-approve-cta:hover {
-  background: rgba(80, 200, 120, 0.28);
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .llm-text {

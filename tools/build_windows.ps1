@@ -9,7 +9,7 @@
 
 param(
   [string]$Name = "SpeechSummarizer",
-  [string]$Entry = "app.py",
+  [string]$Entry = "launcher.py",
   [string]$DistDir = "dist",
   [string]$BuildDir = "build",
   [string]$OutDir = "release",
@@ -46,6 +46,7 @@ try {
   python -m PyInstaller `
     --noconfirm --clean `
     --onedir `
+    --windowed `
     --name $Name `
     $Entry
 
@@ -88,6 +89,12 @@ try {
 
   # config.json.sample → config.json としてコピー
   Remove-Item (Join-Path $AppDir "config.json") -ErrorAction SilentlyContinue
+  if (Test-Path "config.json.sample") {
+    Copy-Item "config.json.sample" -Destination (Join-Path $AppDir "config.json") -Force
+    Write-Host "[pack] copied: config.json.sample -> config.json"
+  } else {
+    Write-Host "[pack] skip (config.json.sample not found)"
+  }
 
   # if (Test-Path "config.json.sample") {
   #   Copy-Item "config.json.sample" -Destination (Join-Path $AppDir "config.json") -Force

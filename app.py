@@ -44,7 +44,7 @@ import hashlib
 # App version (server software version)
 # -------------------------
 # ここを書き換えるだけでUI表示が変わる（config.json には置かない）
-APP_VERSION = "20260307"
+APP_VERSION = "20260308"
 
 # -------------------------
 # Config
@@ -343,8 +343,14 @@ def append_text_line(text_path: str, s: str):
         f.write(s + "\n")
 
 def ensure_unknown_session():
-    if CURRENT["patient_id"] is None:
+    pid = (CURRENT.get("patient_id") or "").strip()
+    has_paths = bool(CURRENT.get("text_path")) and bool(CURRENT.get("jsonl_path"))
+    if not pid:
         new_session("unknown")
+    elif not has_paths:
+        # Patient is known but session files are not assigned yet.
+        # Start a fresh session to avoid None-path writes.
+        new_session(pid)
 
 def new_session(patient_id: str):
     stamp = now_stamp()
@@ -1198,9 +1204,11 @@ def list_patient_sessions(pid: str) -> list[dict]:
     各セッションにLLMファイル一覧・承認済みファイル名を付加。
     """
     pat = f"{pid}_????????_??????.txt"
+    # Sort by session timestamp embedded in filename (YYYYMMDD_HHMMSS),
+    # not file mtime, so metadata updates do not reorder timeline cards.
     files = sorted(
         OUTPUTS_DIR.glob(pat),
-        key=lambda p: p.stat().st_mtime,
+        key=lambda p: (_parse_session_name(p.name) or ("", ""))[1],
         reverse=True
     )
     current_txt = CURRENT.get("text_path")
@@ -1245,7 +1253,12 @@ async def api_sessions():
     """
     Returns list of distinct sessions, now injecting patient_info
     """
-    files = sorted(OUTPUTS_DIR.glob("*.txt"), key=lambda p: p.stat().st_mtime, reverse=True)
+    # Sort by session timestamp in filename for stable ordering.
+    files = sorted(
+        OUTPUTS_DIR.glob("*.txt"),
+        key=lambda p: (_parse_session_name(p.name) or ("", ""))[1],
+        reverse=True
+    )
     items = []
     seen_pid = set()
     for f in files:
@@ -1277,7 +1290,8 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
     dyna_watch_task() と POST /api/patient/switch の両方から呼ぶ。
     既に同じ患者の場合は何もせず現在セッション情報を返す。
     """
-    if CURRENT["patient_id"] == pid:
+    # Keep current session only when both session files are already assigned.
+    if CURRENT["patient_id"] == pid and CURRENT.get("text_path") and CURRENT.get("jsonl_path"):
         return {
             "patient_id": pid,
             "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
@@ -1486,6 +1500,24 @@ async def api_llm_approve(payload: Dict[str, Any] = Body(...)):
     log(f"[APPROVE] session={session_txt} llm_file={llm_file}")
     return {"ok": True, "approved_file": llm_file, "ts": ts}
 
+@app.post("/api/auto-llm/enqueue-current")
+async def api_auto_llm_enqueue_current():
+    if not AUTO_LLM_ENABLED:
+        return {"ok": True, "enqueued": False, "reason": "disabled"}
+
+    cur_jsonl = CURRENT.get("jsonl_path")
+    if not cur_jsonl:
+        return {"ok": True, "enqueued": False, "reason": "no_current_session"}
+
+    jsonl_path = Path(cur_jsonl).resolve()
+    if OUTPUTS_DIR.resolve() not in jsonl_path.parents:
+        return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
+    if not jsonl_path.exists():
+        return {"ok": True, "enqueued": False, "reason": "jsonl_not_found"}
+
+    enqueue_auto_llm_for_jsonl(jsonl_path, reason="recording_stop")
+    return {"ok": True, "enqueued": True, "jsonl": jsonl_path.name}
+
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
 
 def strip_thinking_from_response(text: str) -> str:
@@ -1635,8 +1667,9 @@ async def api_asr_set_config(payload: dict = Body(...)):
 # -------------------------
 # Session APIs
 # -------------------------
-@app.get("/api/sessions")
-def api_sessions():
+# Legacy/basic session list (kept for backward compatibility)
+@app.get("/api/sessions/basic")
+def api_sessions_basic():
     items = []
     for p in _list_session_txt_files():
         info = _parse_session_name(p.name)
@@ -2289,7 +2322,7 @@ async def ws_endpoint(ws: WebSocket):
 # -------------------------
 # main
 # -------------------------
-if __name__ == "__main__":
+def run_server():
     log(f"[APP] start SR={SR} frame={FRAME_MS}ms threshold={THRESHOLD_DB} dyna_dir={DYNA_WATCH_DIR}")
     SSL_CFG = CFG.get("ssl", {}) or {}
 
@@ -2307,3 +2340,6 @@ if __name__ == "__main__":
             host="0.0.0.0",
             port=int(CFG.get("port", 8000))
         )
+
+if __name__ == "__main__":
+    run_server()

@@ -23,8 +23,8 @@
   const btnZoomIn = document.getElementById('btnZoomIn');
   const btnZoomOut = document.getElementById('btnZoomOut');
 
+  const patientSelectEl = document.getElementById('patientSelect');
   const patientInputEl = document.getElementById('patientInput');
-  const patientRecentListEl = document.getElementById('patientRecentList');
   const btnSwitchPatient = document.getElementById('btnSwitchPatient');
 
   const sidebarListEl = document.getElementById('sidebarList');
@@ -46,7 +46,7 @@
   let currentPatientId = '';   // 現在選択中の患者ID
   let currentSessionTxt = '';   // 現在録音中 / 選択中のセッション(.txt)名
   let liveAsrText = '';   // ライブASRの累積テキスト
-  let recentPatientIds = [];   // datalist用: 新しい順・重複なし
+  let recentPatientIds = [];   // 新しい順・重複なし
   let hearingZoom = 1.0;
 
 
@@ -244,7 +244,7 @@
   }
 
   async function loadRecentPatients() {
-    if (!patientRecentListEl) return;
+    if (!patientSelectEl) return;
 
     try {
       const r = await fetch('/api/sessions');
@@ -265,12 +265,19 @@
         }
       }
 
-      patientRecentListEl.innerHTML = recentPatientIds
+      const optionHtml = recentPatientIds
         .map(pid => {
-          const name = pidToName[pid] ? ` ${e_(pidToName[pid])}` : '';
-          return `<option value="${e_(pid)}">${e_(pid)}${name}</option>`;
+          const label = pidToName[pid]
+            ? `${e_(pid)} | ${e_(pidToName[pid])}`
+            : `${e_(pid)}`;
+          return `<option value="${e_(pid)}">${label}</option>`;
         })
         .join('');
+
+      patientSelectEl.innerHTML = `<option value="">履歴</option>${optionHtml}`;
+      if (currentPatientId) {
+        patientSelectEl.value = recentPatientIds.includes(currentPatientId) ? currentPatientId : '';
+      }
 
       log(`[patient] recent list loaded: ${recentPatientIds.length}`);
     } catch (e) {
@@ -292,7 +299,7 @@
 
       const pInfo = (rInfo && rInfo.ok) ? rInfo.patient_info : null;
       renderSidebar(pid, jSessions.sessions || [], pInfo);
-      renderTimeline(pid, jSessions.sessions || [], opts);
+      renderTimeline(jSessions.sessions || [], opts);
     } catch (e) {
       log(`[patient] loadPatientSessions failed: ${e}`);
     }
@@ -383,7 +390,7 @@
   }
 
   // ===== タイムライン描画 =====
-  function renderTimeline(pid, sessions, opts = {}) {
+  function renderTimeline(sessions, opts = {}) {
     if (!karteTimeline) return;
 
     if (!sessions.length) {
@@ -391,7 +398,7 @@
       return;
     }
 
-    karteTimeline.innerHTML = sessions.map(s => buildCard(pid, s)).join('');
+    karteTimeline.innerHTML = sessions.map(s => buildCard(s)).join('');
 
     // カード内イベント登録
     karteTimeline.querySelectorAll('.karte-card').forEach(card => {
@@ -403,7 +410,7 @@
       });
 
       // 確定ボタン
-      card.querySelectorAll('.btn-approve').forEach(btn => {
+      card.querySelectorAll('.btn-approve-cta').forEach(btn => {
         btn.addEventListener('click', async () => {
           const llmFile = btn.dataset.llmFile;
           await approveFile(card, session, llmFile);
@@ -473,14 +480,19 @@
   }
 
   // ===== カード1枚のHTML生成 =====
-  function buildCard(pid, s) {
+  function buildCard(s) {
     const isCurrent = s.is_current;
     const approvedFile = s.approved_file || '';
     const llmFiles = s.llm_files || [];
+    const hasApproved = !!approvedFile;
+    const hasLlm = llmFiles.length > 0;
 
-    // セッションヘッダー
-    const badgeCls = isCurrent ? 'badge-current' : (approvedFile ? 'badge-approved' : 'badge-draft');
-    const badgeLabel = isCurrent ? '● 録音中' : (approvedFile ? '✅ 確定済' : (llmFiles.length ? '📄 下書き' : '📝 ASRのみ'));
+    // セッションヘッダー（LLM状態を優先表示）
+    const badgeCls = hasApproved ? 'badge-approved' : 'badge-draft';
+    const badgeLabel = hasApproved
+      ? '✅ 確定済'
+      : (hasLlm ? '📄 下書き' : '📝 ASRのみ');
+    const recMark = isCurrent ? '<span class="muted2" style="margin-left:6px;">● 録音中</span>' : '';
 
     // LLMファイル一覧（セレクトボックス）
     let llmHistoryHtml = '';
@@ -498,12 +510,10 @@
         `</select>`;
     }
 
-    // 確定ボタン（承認前 & LLMあり のカードのみ）
-    const approveHtml = (llmFiles.length && !approvedFile)
-      ? `<button class="btn btn-sm btn-approve-cta" data-llm-file="" style="display:none">✓ 確定</button>`
-      : (approvedFile
-        ? `<span class="badge-ts-approved" title="${e_(approvedFile)}">✅ 確定済</span>`
-        : '');
+    // 確定ボタン（未承認カードには常に配置し、LLM選択時に表示）
+    const approveHtml = !approvedFile
+      ? `<button class="btn btn-sm btn-approve-cta" data-llm-file="" style="display:none">確定</button>`
+      : `<span class="badge-ts-approved" title="${e_(approvedFile)}">✅ 確定済</span>`;
 
     // LLMセクション（ヘッダーツールバー）
     const llmDefaultModel = selLlmModel?.value || '';
@@ -516,12 +526,12 @@
     return `
 <div class="karte-card card" data-session="${e_(s.session_txt)}" data-is-current="${isCurrent}">
   <!-- カードヘッダー -->
-  <div class="karte-card-hd">
+    <div class="karte-card-hd">
     <div class="karte-card-date">
       <span class="karte-date">${e_(s.date)}</span>
       <span class="karte-time">${e_(s.time)}</span>
     </div>
-    <span class="badge ${badgeCls}">${badgeLabel}</span>
+    <span class="badge ${badgeCls}">${badgeLabel}</span>${recMark}
   </div>
 
   <!-- ASR欄（折りたたみ） -->
@@ -639,7 +649,6 @@
       if (approveBtn) {
         approveBtn.dataset.llmFile = llmFile;
         approveBtn.style.display = '';
-        approveBtn.classList.add('btn-approve');
       }
     } catch (e) {
       if (preEl) preEl.textContent = `(読み込み失敗: ${e})`;
@@ -721,7 +730,6 @@
       // UIを確定済み表示に変更
       if (approveBtn) {
         approveBtn.style.display = 'none';
-        approveBtn.classList.remove('btn-approve');
       }
       const approveBar = card.querySelector('.llm-approve-bar');
       if (approveBar) {
@@ -772,6 +780,9 @@
         patientInputEl.value = '';
         patientInputEl.placeholder = `現在: ${pid}`;
         patientInputEl.blur();
+      }
+      if (patientSelectEl && recentPatientIds.includes(pid)) {
+        patientSelectEl.value = pid;
       }
 
       await loadPatientSessions(pid, { autoShowLatest: true });
@@ -834,8 +845,12 @@
     if (msg.type === 'patient_changed') {
       currentPatientId = msg.patient_id || '';
       currentSessionTxt = msg.session_txt || '';
-      // ナビ入力欄にも反映
-      if (patientInputEl && currentPatientId) patientInputEl.value = currentPatientId;
+      // ナビ表示も同期
+      if (patientInputEl) {
+        patientInputEl.value = '';
+        if (currentPatientId) patientInputEl.placeholder = `現在: ${currentPatientId}`;
+      }
+      if (patientSelectEl) patientSelectEl.value = currentPatientId || '';
       resetLiveAsr();
       log('[patient_changed] ' + currentPatientId);
 
@@ -965,6 +980,15 @@
       isRecording = false;
       renderRecState();
       if (selAsrModel) selAsrModel.disabled = false;
+      try {
+        const r = await fetch('/api/auto-llm/enqueue-current', { method: 'POST' });
+        const j = await r.json();
+        if (j?.ok && j.enqueued) {
+          log(`[auto_llm] enqueued on stop: ${j.jsonl || ''}`);
+        }
+      } catch (e) {
+        log(`[auto_llm] enqueue on stop failed: ${e}`);
+      }
 
       // 停止後にセッション一覧をリフレッシュ
       if (currentPatientId) {
@@ -1001,17 +1025,14 @@
       switchPatientById(patientInputEl?.value);
     });
   }
-  if (patientInputEl) {
-    // 候補選択時は即移動
-    patientInputEl.addEventListener('input', () => {
-      const v = (patientInputEl.value || '').trim();
-      if (!v) return;
-
-      // datalist候補と完全一致した時だけ自動切替
-      if (recentPatientIds.includes(v) && v !== currentPatientId) {
-        switchPatientById(v);
-      }
+  if (patientSelectEl) {
+    patientSelectEl.addEventListener('change', () => {
+      const pid = (patientSelectEl.value || '').trim();
+      if (!pid) return;
+      switchPatientById(pid);
     });
+  }
+  if (patientInputEl) {
 
     // Enter即切替はやめる
     patientInputEl.addEventListener('keydown', e => {

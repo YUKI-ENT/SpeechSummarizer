@@ -23,9 +23,10 @@
     <div class="nav-center">
       <div class="patient-input-group">
         <span class="nav-label">カルテNo:</span>
-        <input type="text" id="patientInput" class="patient-input" list="patientRecentList" placeholder="カルテNoを入力 / 選択"
-          autocomplete="off">
-        <datalist id="patientRecentList"></datalist>
+        <select id="patientSelect" class="patient-select" aria-label="履歴選択">
+          <option value="">履歴</option>
+        </select>
+        <input type="text" id="patientInput" class="patient-input" placeholder="ID入力" autocomplete="off">
         <button id="btnSwitchPatient" class="btn btn-sm" type="button">表示</button>
       </div>
     </div>
