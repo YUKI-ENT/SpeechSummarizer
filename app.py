@@ -765,7 +765,8 @@ async def _run_auto_llm_job(job: dict):
     log(f"[AUTO_LLM] start jsonl={jsonl_path.name} model={model_id} prompt={prompt_id} asr_correct={asr_correct}")
 
     resp = await asyncio.to_thread(_call)
-    summary = (resp.get("response") or "").strip()
+    summary = strip_thinking_from_response(resp.get("response") or "")
+    summary = summary.strip()
 
     dt = time.time() - t0
     if not summary:
@@ -1126,6 +1127,14 @@ async def broadcast(obj: dict, *, reset_states: bool = False):
     for ws in dead:
         CLIENTS.pop(ws, None)
 
+def any_client_recording(*, within_sec: float = 2.0) -> bool:
+    now = time.time()
+    for st in CLIENTS.values():
+        last_audio_rx = getattr(st, "last_audio_rx", 0.0) or 0.0
+        if last_audio_rx > 0 and (now - last_audio_rx) <= within_sec:
+            return True
+    return False
+
 async def dyna_watch_task():
     log(f"[DYNA] watcher started dir={DYNA_WATCH_DIR} glob={DYNA_GLOB}")
     last_batch_sig = None
@@ -1158,8 +1167,9 @@ async def dyna_watch_task():
             if pinfo:
                 pid = pinfo["patient_id"]
                 save_patient_info(pinfo)
-                # ★ Phase 1: 切替ロジックを _do_patient_switch() に共通化
-                await _do_patient_switch(pid, create_new=False)
+                # 録音中の患者遷移では即座に新規セッションを確定し、
+                # UIへ session_txt を載せて通知する。
+                await _do_patient_switch(pid, create_new=any_client_recording())
 
             await asyncio.sleep(0.5)
 
@@ -1184,6 +1194,15 @@ def _parse_session_name(name: str):
     if not m:
         return None
     return m.group("patient_id"), m.group("stamp")
+
+def _list_session_txt_files() -> list[Path]:
+    # Sort by the timestamp embedded in the filename so non-content updates
+    # do not reshuffle the legacy/basic session list.
+    return sorted(
+        OUTPUTS_DIR.glob("*.txt"),
+        key=lambda p: (_parse_session_name(p.name) or ("", ""))[1],
+        reverse=True,
+    )
 
 # =========================================
 # Phase 1: カルテビュー用ヘルパー
@@ -1540,19 +1559,26 @@ async def api_auto_llm_enqueue_current():
     }
 
 _THINK_BLOCK_RE = re.compile(r"<think>.*?</think>\s*", re.DOTALL | re.IGNORECASE)
+_THINK_TAG_RE = re.compile(r"</?think>\s*", re.IGNORECASE)
+_SOAP_HEADING_PATTERNS = [
+    re.compile(r"^\s*\*\*S(?:\s*[\(（][^*\n]+[\)）])?\*\*", re.MULTILINE),
+    re.compile(r"^\s*【S】", re.MULTILINE),
+    re.compile(r"^\s*＜S＞", re.MULTILINE),
+    re.compile(r"^\s*S(?:ubjective)?\s*[：:]", re.MULTILINE),
+]
 
 def strip_thinking_from_response(text: str) -> str:
     if not text:
         return ""
-    # まず <think>…</think> のブロックがあれば除去
-    text2 = _THINK_BLOCK_RE.sub("", text).lstrip()
+    # <think>…</think> の完全ブロックを除去し、孤立タグも落とす。
+    text2 = _THINK_BLOCK_RE.sub("", text)
+    text2 = _THINK_TAG_RE.sub("", text2).lstrip()
 
-    # それでも「手順」っぽい前置きが残る場合の保険：
-    # SOAPの開始位置を探してそこから採用（**S** や "S:" を想定）
-    for marker in ["**S**", "S\n", "S:", "【S】", "＜S＞"]:
-        idx = text2.find(marker)
-        if idx != -1:
-            return text2[idx:].strip()
+    # 推論メモが前置きされても、SOAP見出し以降だけを採用する。
+    for cre in _SOAP_HEADING_PATTERNS:
+        m = cre.search(text2)
+        if m:
+            return text2[m.start():].strip()
 
     return text2.strip()
 
@@ -2048,6 +2074,7 @@ class State:
         self.utter_frames: list[np.ndarray] = []
         self.seg_index = 0
         self.last_level_sent = 0.0
+        self.last_audio_rx = 0.0
 
         self.asr_q: asyncio.Queue[dict] = asyncio.Queue(maxsize=int(CFG.get("asr_queue", 20)))
         self.asr_task: asyncio.Task | None = None
@@ -2334,6 +2361,7 @@ async def ws_endpoint(ws: WebSocket):
                 log("[WS] state reset (patient_changed)")
 
             data = await ws.receive_bytes()
+            st.last_audio_rx = time.time()
             x = np.frombuffer(data, dtype=np.float32)
             if x.size == 0:
                 continue

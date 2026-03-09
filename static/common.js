@@ -52,6 +52,7 @@
   let hearingSaveTimer = null;
   let hearingLastSavedSession = '';
   let hearingLastSavedText = '';
+  let patientSessionRefreshTimer = null;
 
 
   // ===== ログ =====
@@ -469,6 +470,73 @@
     return String(s || '').replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
   }
 
+  function parseSessionStamp(sessionTxt) {
+    const m = String(sessionTxt || '').match(/^(.+?)_(\d{8}_\d{6})\.txt$/);
+    if (!m) return null;
+    return { patientId: m[1], stamp: m[2] };
+  }
+
+  function buildOptimisticSession(sessionTxt) {
+    const parsed = parseSessionStamp(sessionTxt);
+    if (!parsed) return null;
+    const { stamp } = parsed;
+    return {
+      session_txt: sessionTxt,
+      stamp,
+      date: `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}`,
+      time: `${stamp.slice(9, 11)}:${stamp.slice(11, 13)}`,
+      is_current: true,
+      llm_files: [],
+      approved_file: '',
+    };
+  }
+
+  function ensureRecentPatientOption(pid) {
+    pid = String(pid || '').trim();
+    if (!pid || !patientSelectEl) return;
+
+    recentPatientIds = [pid, ...recentPatientIds.filter(x => x !== pid)];
+
+    const optionMap = new Map();
+    Array.from(patientSelectEl.querySelectorAll('option')).forEach(opt => {
+      if (opt.value) optionMap.set(opt.value, opt.textContent || opt.value);
+    });
+    if (!optionMap.has(pid)) optionMap.set(pid, pid);
+
+    const optionHtml = recentPatientIds
+      .filter(x => optionMap.has(x))
+      .map(x => `<option value="${e_(x)}">${e_(optionMap.get(x) || x)}</option>`)
+      .join('');
+
+    patientSelectEl.innerHTML = `<option value="">履歴</option>${optionHtml}`;
+    patientSelectEl.value = pid;
+  }
+
+  function renderOptimisticPatientSwitch(pid, sessionTxt, patientInfo) {
+    const session = buildOptimisticSession(sessionTxt);
+    if (!pid || !session) return;
+    renderSidebar(pid, [session], patientInfo || null);
+    renderTimeline([session], {});
+  }
+
+  function hasSessionCard(sessionTxt) {
+    if (!karteTimeline || !sessionTxt) return false;
+    return !!karteTimeline.querySelector(`.karte-card[data-session="${CSS.escape(sessionTxt)}"]`);
+  }
+
+  function schedulePatientSessionRefresh(pid, opts = {}) {
+    pid = String(pid || '').trim();
+    if (!pid) return;
+    clearTimeout(patientSessionRefreshTimer);
+    patientSessionRefreshTimer = setTimeout(() => {
+      patientSessionRefreshTimer = null;
+      loadPatientSessions(pid, opts)
+        .then(() => loadAllCardAsrText())
+        .then(() => loadRecentPatients())
+        .catch(e => log(`[patient] refresh failed: ${e}`));
+    }, 120);
+  }
+
   // ===== タイムライン描画 =====
   function renderTimeline(sessions, opts = {}) {
     if (!karteTimeline) return;
@@ -854,11 +922,12 @@
       log(`[patient] switched -> ${pid} session=${j.session_txt} resumed=${j.resumed}`);
       currentPatientId = pid;
       currentSessionTxt = j.session_txt || '';
+      ensureRecentPatientOption(pid);
 
       // ★ ここを変更：選択後は入力欄を空に戻す
       if (patientInputEl) {
         patientInputEl.value = '';
-        patientInputEl.placeholder = `現在: ${pid}`;
+        patientInputEl.placeholder = `${pid}`;
         patientInputEl.blur();
       }
       if (patientSelectEl && recentPatientIds.includes(pid)) {
@@ -924,26 +993,34 @@
     if (msg.type === 'patient_changed') {
       currentPatientId = msg.patient_id || '';
       currentSessionTxt = msg.session_txt || '';
+      ensureRecentPatientOption(currentPatientId);
       // ナビ表示も同期
       if (patientInputEl) {
         patientInputEl.value = '';
-        if (currentPatientId) patientInputEl.placeholder = `現在: ${currentPatientId}`;
+        if (currentPatientId) patientInputEl.placeholder = `${currentPatientId}`;
       }
       if (patientSelectEl) patientSelectEl.value = currentPatientId || '';
       resetLiveAsr();
       log('[patient_changed] ' + currentPatientId);
 
-      // Update sidebar immediately if patient_info is provided
-      if (msg.patient_info && currentPatientId) {
-        // fetch session details separately but we can tentatively render sidebar patient list if we had logic for it
-        // the simplest is to let loadPatientSessions completely rerender it below safely.
+      if (currentPatientId && currentSessionTxt) {
+        renderOptimisticPatientSwitch(currentPatientId, currentSessionTxt, msg.patient_info);
       }
 
-      loadPatientSessions(currentPatientId, { autoShowLatest: true })
-        .then(() => loadAllCardAsrText());
+      schedulePatientSessionRefresh(currentPatientId, { autoShowLatest: true });
+    }
+
+    if (msg.type === 'saved') {
+      if (!currentPatientId || msg.patient_id !== currentPatientId) return;
+      if (!currentSessionTxt || !hasSessionCard(currentSessionTxt)) {
+        schedulePatientSessionRefresh(currentPatientId, { autoShowLatest: true });
+      }
     }
 
     if (msg.type === 'asr') {
+      if ((!currentSessionTxt || !hasSessionCard(currentSessionTxt)) && currentPatientId && msg.patient_id === currentPatientId) {
+        schedulePatientSessionRefresh(currentPatientId, { autoShowLatest: true });
+      }
       if (msg.text) appendLiveAsr(msg.text);
     }
 
@@ -1156,4 +1233,3 @@
   loadRecentPatients();
   connectWs();  // ★ 起動時にWS接続（常時接続）
 })();
-
