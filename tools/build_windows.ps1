@@ -23,6 +23,43 @@ function Assert-Exists([string]$Path){
   if (!(Test-Path $Path)) { throw "Not found: $Path" }
 }
 
+function Wait-UntilFileUnlocked([string]$Path, [int]$TimeoutSeconds = 30){
+  if (!(Test-Path $Path)) { return }
+
+  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
+  while ((Get-Date) -lt $deadline) {
+    try {
+      $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'None')
+      $stream.Close()
+      return
+    }
+    catch [System.IO.IOException] {
+      Start-Sleep -Milliseconds 500
+    }
+  }
+
+  throw "Timed out waiting for file to unlock: $Path"
+}
+
+function Compress-ArchiveWithRetry(
+  [string]$SourcePath,
+  [string]$DestinationPath,
+  [int]$MaxAttempts = 5
+){
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    try {
+      Compress-Archive -Path $SourcePath -DestinationPath $DestinationPath -Force
+      return
+    }
+    catch [System.IO.IOException] {
+      if ($attempt -eq $MaxAttempts) { throw }
+      Write-Host "[zip] retry $attempt/$MaxAttempts after file lock"
+      if (Test-Path $DestinationPath) { Remove-Item $DestinationPath -Force -ErrorAction SilentlyContinue }
+      Start-Sleep -Seconds 2
+    }
+  }
+}
+
 # どこから実行されても repo ルートに合わせる
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $RepoRoot  = Resolve-Path (Join-Path $ScriptDir "..")
@@ -116,13 +153,16 @@ try {
   if (!(Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
 
   $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
-  $zipName = "$Name-win64-onedir-$stamp.zip"
+  $modelTag = if ($IncludeModels) { "" } else { "-NoModels" }
+  $zipName = "$Name$modelTag-win64-onedir-$stamp.zip"
   $zipPath = Join-Path $OutDir $zipName
+  $baseLibraryZip = Join-Path $internalDir "base_library.zip"
 
   if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
+  Wait-UntilFileUnlocked -Path $baseLibraryZip
   Write-Host "[zip] create: $zipPath"
-  Compress-Archive -Path $AppDir -DestinationPath $zipPath -Force
+  Compress-ArchiveWithRetry -SourcePath $AppDir -DestinationPath $zipPath
 
   Write-Host "[done] $zipPath"
 }
