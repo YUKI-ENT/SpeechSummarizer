@@ -188,6 +188,34 @@ class LauncherApp:
         self._add_text(parent, "asr_initial_prompt", "Initial Prompt", ("asr", "initial_prompt"), row=row, height=5)
         row += 1
 
+        vad_box = ttk.LabelFrame(parent, text="VAD", padding=10)
+        vad_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        for i in range(4):
+            vad_box.columnconfigure(i, weight=1)
+
+        vad_row = 0
+        self._add_choice(vad_box, "vad_mode", "Mode", ("vad", "mode"), ["auto", "manual"], row=vad_row)
+        self._add_entry(vad_box, "vad_manual_threshold_db", "Manual Threshold dB", ("vad", "manual_threshold_db"), kind="float", row=vad_row, col=2, width=12)
+        vad_row += 1
+        self._add_entry(vad_box, "vad_calibration_sec", "Calibration sec", ("vad", "calibration_sec"), kind="float", row=vad_row, width=12)
+        self._add_entry(vad_box, "vad_margin_db", "Margin dB", ("vad", "margin_db"), kind="float", row=vad_row, col=2, width=12)
+        vad_row += 1
+        self._add_entry(vad_box, "vad_min_threshold_db", "Min Threshold dB", ("vad", "min_threshold_db"), kind="float", row=vad_row, width=12)
+        self._add_entry(vad_box, "vad_max_threshold_db", "Max Threshold dB", ("vad", "max_threshold_db"), kind="float", row=vad_row, col=2, width=12)
+        vad_row += 1
+        self._add_entry(vad_box, "vad_noise_window_sec", "Noise Window sec", ("vad", "noise_window_sec"), kind="float", row=vad_row, width=12)
+        self._add_entry(vad_box, "vad_update_margin_db", "Update Margin dB", ("vad", "update_margin_db"), kind="float", row=vad_row, col=2, width=12)
+        vad_row += 1
+        self._add_entry(vad_box, "vad_start_voice_frames", "Start Voice Frames", ("vad", "start_voice_frames"), kind="int", row=vad_row, width=12)
+        self._add_entry(vad_box, "vad_end_silence_frames", "End Silence Frames", ("vad", "end_silence_frames"), kind="int", row=vad_row, col=2, width=12)
+        vad_row += 1
+        self._add_entry(vad_box, "vad_pre_roll_ms", "Pre-roll ms", ("vad", "pre_roll_ms"), kind="int", row=vad_row, width=12)
+        self._add_entry(vad_box, "vad_quiet_percentile", "Quiet Percentile", ("vad", "quiet_percentile"), kind="float", row=vad_row, col=2, width=12)
+        vad_row += 1
+        self._add_entry(vad_box, "vad_min_sec", "Min sec", ("vad", "min_sec"), kind="float", row=vad_row, width=12)
+        self._add_entry(vad_box, "vad_max_sec", "Max sec", ("vad", "max_sec"), kind="float", row=vad_row, col=2, width=12)
+        row += 1
+
         model_box = ttk.LabelFrame(parent, text="モデルIDとパス", padding=10)
         model_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
         model_box.columnconfigure(1, weight=1)

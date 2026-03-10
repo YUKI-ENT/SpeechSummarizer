@@ -13,6 +13,23 @@
   
   "port": 8000,
 
+  "vad": {
+    "mode": "auto",
+    "manual_threshold_db": -42.0,
+    "calibration_sec": 1.5,
+    "margin_db": 10.0,
+    "min_threshold_db": -55.0,
+    "max_threshold_db": -20.0,
+    "noise_window_sec": 6.0,
+    "update_margin_db": 3.0,
+    "quiet_percentile": 20.0,
+    "start_voice_frames": 3,
+    "end_silence_frames": 12,
+    "pre_roll_ms": 300,
+    "min_sec": 0.4,
+    "max_sec": 20.0
+  },
+
   "ssl": {
     "enabled": false,
     "certfile": "certs/cert.pem",

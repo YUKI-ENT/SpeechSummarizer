@@ -8,6 +8,7 @@ import json
 import datetime
 import asyncio
 import sys
+from collections import deque
 
 from pathlib import Path
 from urllib.parse import unquote
@@ -44,7 +45,7 @@ import hashlib
 # App version (server software version)
 # -------------------------
 # ここを書き換えるだけでUI表示が変わる（config.json には置かない）
-APP_VERSION = "20260308"
+APP_VERSION = "20260310"
 
 # -------------------------
 # Config
@@ -873,13 +874,35 @@ SR = int(CFG.get("sr", 48000))
 FRAME_MS = int(CFG.get("frame_ms", 50))
 FRAME = int(SR * FRAME_MS / 1000)
 
-THRESHOLD_DB = float(CFG.get("threshold_db", -42.0))
-START_VOICE_FRAMES = int(CFG.get("start_voice_frames", 3))
-END_SILENCE_FRAMES = int(CFG.get("end_silence_frames", 12))
-PRE_ROLL_MS = int(CFG.get("pre_roll_ms", 300))
+VAD_CFG = CFG.get("vad", {}) or {}
+VAD_MODE = str(VAD_CFG.get("mode", "manual")).strip().lower() or "manual"
+if VAD_MODE not in {"manual", "auto"}:
+    VAD_MODE = "manual"
+MANUAL_THRESHOLD_DB = float(VAD_CFG.get("manual_threshold_db", CFG.get("threshold_db", -42.0)))
+START_VOICE_FRAMES = int(VAD_CFG.get("start_voice_frames", CFG.get("start_voice_frames", 3)))
+END_SILENCE_FRAMES = int(VAD_CFG.get("end_silence_frames", CFG.get("end_silence_frames", 12)))
+PRE_ROLL_MS = int(VAD_CFG.get("pre_roll_ms", CFG.get("pre_roll_ms", 300)))
 PRE_ROLL_FRAMES = max(1, int(PRE_ROLL_MS / FRAME_MS))
-MIN_SEC = float(CFG.get("min_sec", 0.4))
-MAX_SEC = float(CFG.get("max_sec", 20.0))
+MIN_SEC = float(VAD_CFG.get("min_sec", CFG.get("min_sec", 0.4)))
+MAX_SEC = float(VAD_CFG.get("max_sec", CFG.get("max_sec", 20.0)))
+VAD_CALIBRATION_SEC = max(0.0, float(VAD_CFG.get("calibration_sec", 1.5)))
+VAD_MARGIN_DB = float(VAD_CFG.get("margin_db", 10.0))
+VAD_MIN_THRESHOLD_DB = float(VAD_CFG.get("min_threshold_db", -55.0))
+VAD_MAX_THRESHOLD_DB = float(VAD_CFG.get("max_threshold_db", -20.0))
+VAD_NOISE_WINDOW_SEC = max(VAD_CALIBRATION_SEC, float(VAD_CFG.get("noise_window_sec", 6.0)))
+VAD_UPDATE_MARGIN_DB = max(0.0, float(VAD_CFG.get("update_margin_db", 3.0)))
+VAD_QUIET_PERCENTILE = float(VAD_CFG.get("quiet_percentile", 20.0))
+VAD_QUIET_PERCENTILE = min(50.0, max(1.0, VAD_QUIET_PERCENTILE))
+VAD_CALIBRATION_FRAMES = max(1, int(VAD_CALIBRATION_SEC * 1000 / FRAME_MS)) if VAD_CALIBRATION_SEC > 0 else 0
+VAD_NOISE_WINDOW_FRAMES = max(VAD_CALIBRATION_FRAMES, int(VAD_NOISE_WINDOW_SEC * 1000 / FRAME_MS))
+
+def clamp_float(x: float, lo: float, hi: float) -> float:
+    return max(lo, min(hi, x))
+
+def calc_auto_threshold_db(noise_floor_db: float | None) -> float:
+    if noise_floor_db is None:
+        return clamp_float(MANUAL_THRESHOLD_DB, VAD_MIN_THRESHOLD_DB, VAD_MAX_THRESHOLD_DB)
+    return clamp_float(noise_floor_db + VAD_MARGIN_DB, VAD_MIN_THRESHOLD_DB, VAD_MAX_THRESHOLD_DB)
 
 def rms_dbfs(x: np.ndarray) -> float:
     rms = float(np.sqrt(np.mean(x * x) + 1e-12))
@@ -2075,6 +2098,10 @@ class State:
         self.seg_index = 0
         self.last_level_sent = 0.0
         self.last_audio_rx = 0.0
+        self.noise_floor_db: float | None = None
+        self.noise_levels_db = deque(maxlen=max(1, VAD_NOISE_WINDOW_FRAMES))
+        self.calibration_frames = 0
+        self.last_threshold_db = calc_auto_threshold_db(None)
 
         self.asr_q: asyncio.Queue[dict] = asyncio.Queue(maxsize=int(CFG.get("asr_queue", 20)))
         self.asr_task: asyncio.Task | None = None
@@ -2087,6 +2114,10 @@ class State:
         self.voice_run = 0
         self.silence_run = 0
         self.utter_frames = []
+        self.noise_floor_db = None
+        self.noise_levels_db.clear()
+        self.calibration_frames = 0
+        self.last_threshold_db = calc_auto_threshold_db(None)
 
         try:
             while True:
@@ -2099,6 +2130,36 @@ class State:
         self.ring.append(f)
         if len(self.ring) > PRE_ROLL_FRAMES:
             self.ring.pop(0)
+
+    def update_noise_floor(self, level_db: float):
+        if VAD_MODE != "auto":
+            self.last_threshold_db = clamp_float(MANUAL_THRESHOLD_DB, VAD_MIN_THRESHOLD_DB, VAD_MAX_THRESHOLD_DB)
+            return
+
+        current_threshold = calc_auto_threshold_db(self.noise_floor_db)
+        allow_update = (
+            self.calibration_frames < VAD_CALIBRATION_FRAMES
+            or level_db <= current_threshold - VAD_UPDATE_MARGIN_DB
+        )
+        if not allow_update:
+            self.last_threshold_db = current_threshold
+            return
+
+        self.noise_levels_db.append(level_db)
+        self.calibration_frames += 1
+
+        if self.noise_levels_db:
+            arr = np.array(self.noise_levels_db, dtype=np.float32)
+            self.noise_floor_db = float(np.percentile(arr, VAD_QUIET_PERCENTILE))
+
+        self.last_threshold_db = calc_auto_threshold_db(self.noise_floor_db)
+
+    def current_threshold_db(self) -> float:
+        if VAD_MODE == "auto":
+            self.last_threshold_db = calc_auto_threshold_db(self.noise_floor_db)
+        else:
+            self.last_threshold_db = clamp_float(MANUAL_THRESHOLD_DB, VAD_MIN_THRESHOLD_DB, VAD_MAX_THRESHOLD_DB)
+        return self.last_threshold_db
 
     def finalize_segment(self):
         if not self.utter_frames:
@@ -2130,6 +2191,9 @@ class State:
             "clip_ratio": round(clip_ratio(audio), 4),
             "silence_ratio": round(silence_ratio(audio), 4),
             "zcr": round(zcr(audio), 4),
+            "noise_floor_db": round(self.noise_floor_db, 2) if self.noise_floor_db is not None else None,
+            "threshold_db": round(self.current_threshold_db(), 2),
+            "vad_mode": VAD_MODE,
         }
 
         seg = {
@@ -2376,10 +2440,19 @@ async def ws_endpoint(ws: WebSocket):
                 now = time.time()
                 if now - st.last_level_sent >= 0.5:
                     st.last_level_sent = now
-                    await ws.send_json({"type": "level", "dbfs": round(level, 2)})
+                    await ws.send_json({
+                        "type": "level",
+                        "dbfs": round(level, 2),
+                        "threshold_db": round(st.current_threshold_db(), 2),
+                        "noise_floor_db": round(st.noise_floor_db, 2) if st.noise_floor_db is not None else None,
+                        "vad_mode": VAD_MODE,
+                    })
 
                 st.push_ring(f)
-                is_voice = level > THRESHOLD_DB
+                if not st.in_speech:
+                    st.update_noise_floor(level)
+                threshold_db = st.current_threshold_db()
+                is_voice = level > threshold_db
 
                 if not st.in_speech:
                     if is_voice:
@@ -2437,7 +2510,11 @@ async def ws_endpoint(ws: WebSocket):
 # main
 # -------------------------
 def run_server():
-    log(f"[APP] start SR={SR} frame={FRAME_MS}ms threshold={THRESHOLD_DB} dyna_dir={DYNA_WATCH_DIR}")
+    startup_threshold = clamp_float(MANUAL_THRESHOLD_DB, VAD_MIN_THRESHOLD_DB, VAD_MAX_THRESHOLD_DB)
+    log(
+        f"[APP] start SR={SR} frame={FRAME_MS}ms vad_mode={VAD_MODE} "
+        f"manual_threshold={startup_threshold} margin={VAD_MARGIN_DB} dyna_dir={DYNA_WATCH_DIR}"
+    )
     SSL_CFG = CFG.get("ssl", {}) or {}
 
     if SSL_CFG.get("enabled"):
