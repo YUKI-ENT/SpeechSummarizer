@@ -20,6 +20,7 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from tools.so_labeler.app import app as so_labeler_app
 import uvicorn
 from faster_whisper import WhisperModel
 import httpx
@@ -45,7 +46,7 @@ import hashlib
 # App version (server software version)
 # -------------------------
 # ここを書き換えるだけでUI表示が変わる（config.json には置かない）
-APP_VERSION = "20260310"
+APP_VERSION = "20260322"
 
 # -------------------------
 # Config
@@ -1206,6 +1207,15 @@ async def dyna_watch_task():
 STATIC_DIR = resolve_relpath("static")
 app = FastAPI()
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
+
+so_labeler_app.state.default_data_dir = str(OUTPUTS_DIR.parent)
+so_labeler_app.state.default_llm_mode = "ollama"
+so_labeler_app.state.llm_config = {
+    "base_url": OLLAMA_HOST,
+    "model": OLLAMA_MODEL_DEFAULT,
+    "timeout_sec": int(OLLAMA_TIMEOUT),
+}
+app.mount("/so-labeler", so_labeler_app)
 
 # -------------------------
 # データ表示
