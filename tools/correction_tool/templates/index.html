@@ -1,0 +1,94 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>誤変換補正ツール</title>
+  <link rel="stylesheet" href="/analysis-tools/correction-tool/static/style.css">
+</head>
+<body>
+  <div class="page">
+    <header class="hero">
+      <a href="/analysis-tools" class="back-link">分析ツールへ戻る</a>
+      <h1>誤変換補正ツール</h1>
+      <p>診察会話 JSONL を見ながら、ASR モデル別の誤変換辞書を育てます。LLM の候補抽出と手入力の両方に対応します。</p>
+    </header>
+
+    <section class="card">
+      <h2>1. 対象 JSONL</h2>
+      <div class="grid cols-3">
+        <div class="field span-3"><label>data フォルダ</label><input id="dataDir"></div>
+        <div class="field"><label>開始日</label><input id="startDate" type="date"></div>
+        <div class="field"><label>終了日</label><input id="endDate" type="date"></div>
+        <div class="field align-end"><button id="btnList">jsonl 一覧取得</button></div>
+      </div>
+      <div class="action-row">
+        <button id="btnCheckAll" class="button-secondary">全選択</button>
+        <button id="btnUncheckAll" class="button-secondary">全解除</button>
+      </div>
+      <div id="fileList" class="file-list"></div>
+    </section>
+
+    <section class="card">
+      <h2>2. セッション読込</h2>
+      <div class="grid cols-3">
+        <div class="field align-end"><button id="btnLoadSessions">選択した JSONL を開く</button></div>
+        <div class="field"><label>モデル候補</label><select id="ruleModel"></select></div>
+        <div class="field"><label>接続先</label><input id="llmInfo" disabled></div>
+      </div>
+      <p id="busyStatus" class="status-line" aria-live="polite"></p>
+    </section>
+
+    <section class="card review-card">
+      <div class="review-header">
+        <div>
+          <h2>3. セッション確認</h2>
+          <p id="sessionCount" class="muted"></p>
+        </div>
+        <div class="nav-buttons">
+          <button id="btnPrev" class="button-secondary">前へ</button>
+          <button id="btnNext" class="button-secondary">次へ</button>
+        </div>
+      </div>
+      <div class="grid cols-3">
+        <div class="field"><label>LLM モデル</label><select id="llmModel"></select></div>
+        <div class="field"><label>プロンプト</label><select id="promptId"></select></div>
+        <div class="field align-end"><button id="btnSuggest">LLM 候補抽出</button></div>
+      </div>
+      <div id="sessionMeta" class="muted"></div>
+      <p class="muted">発話をクリックすると全文を誤変換欄へ入れます。発話の一部をドラッグ選択してマウスを離すと、選択部分だけを誤変換欄へ入れます。</p>
+      <div id="transcriptPane" class="transcript-pane"></div>
+      <div class="grid cols-2">
+        <div class="field">
+          <label>誤変換</label>
+          <input id="wrongText" placeholder="例: 席">
+        </div>
+        <div class="field">
+          <label>補正後</label>
+          <input id="correctText" placeholder="例: 咳">
+        </div>
+      </div>
+      <div class="action-row">
+        <button id="btnSaveRule">この辞書を追加</button>
+        <button id="btnPreview" class="button-secondary">補正プレビュー</button>
+      </div>
+      <div class="grid cols-2">
+        <section class="panel">
+          <h3>LLM 候補</h3>
+          <div id="suggestions" class="list"></div>
+        </section>
+        <section class="panel">
+          <h3>補正プレビュー</h3>
+          <pre id="previewText"></pre>
+        </section>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2>4. 現在の辞書</h2>
+      <div id="rulesList" class="rules-list"></div>
+    </section>
+  </div>
+  <script src="/analysis-tools/correction-tool/static/app.js"></script>
+</body>
+</html>

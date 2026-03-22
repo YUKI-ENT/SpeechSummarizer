@@ -20,6 +20,8 @@ import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
+from tools.analysis_tools.app import app as analysis_tools_app
+from tools.correction_tool.app import app as correction_tool_app
 from tools.so_labeler.app import app as so_labeler_app
 import uvicorn
 from faster_whisper import WhisperModel
@@ -150,10 +152,73 @@ def load_correction_rules(force_reload: bool = False) -> dict:
     _CORRECTION_CACHE = rules
     return rules
 
+
+def _effective_correction_rules(rules: dict, model_name: Optional[str] = None) -> dict:
+    effective = dict(rules or {})
+    model_rules = effective.pop("model_rules", None) or {}
+    scoped = model_rules.get(model_name or "", {}) if isinstance(model_rules, dict) else {}
+    if not isinstance(scoped, dict):
+        scoped = {}
+
+    base_replacements = effective.get("replacements") or {}
+    scoped_replacements = scoped.get("replacements") or {}
+    effective["replacements"] = {
+        **(base_replacements if isinstance(base_replacements, dict) else {}),
+        **(scoped_replacements if isinstance(scoped_replacements, dict) else {}),
+    }
+
+    base_regex = effective.get("regex_replacements") or []
+    scoped_regex = scoped.get("regex_replacements") or []
+    effective["regex_replacements"] = [
+        *(base_regex if isinstance(base_regex, list) else []),
+        *(scoped_regex if isinstance(scoped_regex, list) else []),
+    ]
+
+    base_blacklist = effective.get("blacklist_words") or []
+    scoped_blacklist = scoped.get("blacklist_words") or []
+    effective["blacklist_words"] = [
+        *(base_blacklist if isinstance(base_blacklist, list) else []),
+        *(scoped_blacklist if isinstance(scoped_blacklist, list) else []),
+    ]
+
+    base_drop = effective.get("drop_regex") or []
+    scoped_drop = scoped.get("drop_regex") or []
+    effective["drop_regex"] = [
+        *(base_drop if isinstance(base_drop, list) else []),
+        *(scoped_drop if isinstance(scoped_drop, list) else []),
+    ]
+
+    if "min_chars_per_line" in scoped:
+        effective["min_chars_per_line"] = scoped.get("min_chars_per_line")
+
+    return effective
+
+
+def detect_asr_model_from_jsonl(jsonl_path: Path) -> Optional[str]:
+    counts: dict[str, int] = {}
+    try:
+        with jsonl_path.open("r", encoding="utf-8") as f:
+            for line in f:
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if row.get("type") != "asr":
+                    continue
+                asr_cfg = row.get("asr_cfg") or {}
+                model_name = str(asr_cfg.get("model_name") or "").strip()
+                if not model_name:
+                    continue
+                counts[model_name] = counts.get(model_name, 0) + 1
+    except Exception:
+        return None
+    if not counts:
+        return None
+    return max(counts.items(), key=lambda item: item[1])[0]
+
 def _sha1_text(s: str) -> str:
     return hashlib.sha1(s.encode("utf-8", errors="ignore")).hexdigest()
 
-def apply_corrections(text: str, rules: dict) -> tuple[str, dict]:
+def apply_corrections(text: str, rules: dict, model_name: Optional[str] = None) -> tuple[str, dict]:
     """
     行単位で補正:
       - replacements（単純置換）
@@ -163,6 +228,8 @@ def apply_corrections(text: str, rules: dict) -> tuple[str, dict]:
     """
     if not text:
         return text, {"changed": False, "lines_in": 0, "lines_out": 0}
+
+    rules = _effective_correction_rules(rules, model_name=model_name)
 
     repl = rules.get("replacements") or {}
     if not isinstance(repl, dict):
@@ -744,7 +811,8 @@ async def _run_auto_llm_job(job: dict):
     if asr_correct:
         try:
             rules = load_correction_rules()
-            asr_text, _stats = apply_corrections(asr_text, rules)
+            session_model = detect_asr_model_from_jsonl(jsonl_path)
+            asr_text, _stats = apply_corrections(asr_text, rules, model_name=session_model)
         except Exception as e:
             log(f"[AUTO_LLM] asr_correct failed: {e}")
 
@@ -1210,11 +1278,74 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 so_labeler_app.state.default_data_dir = str(OUTPUTS_DIR.parent)
 so_labeler_app.state.default_llm_mode = "ollama"
+_so_labeler_prompts = LLM_CFG.get("so_labeler_prompts") or {}
+if not isinstance(_so_labeler_prompts, dict):
+    _so_labeler_prompts = {}
+_so_labeler_prompt_items = []
+_so_labeler_prompt_templates = {}
+for _pid, _cfg in _so_labeler_prompts.items():
+    if not isinstance(_pid, str) or not _pid.strip():
+        continue
+    if not isinstance(_cfg, dict):
+        continue
+    _label = (_cfg.get("label") or _pid).strip()
+    _template = (_cfg.get("template") or "").strip()
+    if not _template:
+        continue
+    _so_labeler_prompt_items.append({"id": _pid, "label": _label})
+    _so_labeler_prompt_templates[_pid] = _template
+_so_labeler_prompt_items.sort(key=lambda x: x["id"])
 so_labeler_app.state.llm_config = {
     "base_url": OLLAMA_HOST,
     "model": OLLAMA_MODEL_DEFAULT,
     "timeout_sec": int(OLLAMA_TIMEOUT),
+    "temperature": float(OLLAMA_TEMPERATURE),
+    "top_p": float(OLLAMA_TOP_P),
 }
+so_labeler_app.state.so_labeler_prompt_items = _so_labeler_prompt_items
+so_labeler_app.state.so_labeler_prompt_templates = _so_labeler_prompt_templates
+so_labeler_app.state.default_prompt_id = (
+    LLM_CFG.get("so_labeler_default_prompt_id")
+    or (_so_labeler_prompt_items[0]["id"] if _so_labeler_prompt_items else "boundary_v1")
+)
+correction_tool_app.state.default_data_dir = str(OUTPUTS_DIR.parent)
+correction_tool_app.state.correction_rules_path = str(CORRECTION_RULES_PATH)
+correction_tool_app.state.llm_config = {
+    "base_url": OLLAMA_HOST,
+    "model": OLLAMA_MODEL_DEFAULT,
+    "timeout_sec": int(OLLAMA_TIMEOUT),
+    "temperature": float(OLLAMA_TEMPERATURE),
+    "top_p": float(OLLAMA_TOP_P),
+}
+_correction_prompt_items = [{"id": "correction_v1", "label": "誤変換補正候補 v1"}]
+_correction_prompt_templates = {
+    "correction_v1": (
+        "以下は耳鼻科診察会話のASRテキストです。明らかな誤変換だけを高精度で抽出してください。"
+        "返答はJSON配列のみで、各要素は"
+        "{{\"wrong\":\"誤変換\",\"correct\":\"正しい語\",\"reason\":\"短い理由\"}}"
+        "の形式。最大10件。自信が低いものは出さないでください。\n\n"
+        "{transcript}\n"
+    )
+}
+if isinstance(LLM_CFG.get("correction_tool_prompts"), dict):
+    _correction_prompt_items = []
+    _correction_prompt_templates = {}
+    for _pid, _cfg in (LLM_CFG.get("correction_tool_prompts") or {}).items():
+        if not isinstance(_cfg, dict):
+            continue
+        _template = str(_cfg.get("template") or "").strip()
+        if not _template:
+            continue
+        _correction_prompt_items.append({"id": _pid, "label": str(_cfg.get("label") or _pid)})
+        _correction_prompt_templates[_pid] = _template
+correction_tool_app.state.prompt_items = _correction_prompt_items
+correction_tool_app.state.prompt_templates = _correction_prompt_templates
+correction_tool_app.state.default_prompt_id = (
+    LLM_CFG.get("correction_tool_default_prompt_id")
+    or (_correction_prompt_items[0]["id"] if _correction_prompt_items else "correction_v1")
+)
+correction_tool_app.state.asr_models = list((MODELS_REGISTRY or {}).keys())
+app.mount("/analysis-tools", analysis_tools_app)
 app.mount("/so-labeler", so_labeler_app)
 
 # -------------------------
@@ -1915,10 +2046,11 @@ async def api_correct_apply(payload: Dict[str, Any] = Body(...)):
         return JSONResponse({"ok": False, "error": "jsonl not found"}, status_code=404)
 
     rules = load_correction_rules()
+    session_model = detect_asr_model_from_jsonl(jsonl_path)
     before_text = txt_path.read_text(encoding="utf-8", errors="replace")
     before_text = strip_resume_markers(before_text) 
 
-    after_text, stats = apply_corrections(before_text, rules)
+    after_text, stats = apply_corrections(before_text, rules, model_name=session_model)
 
     # 変更が無ければそのまま返す
     if not stats.get("changed"):
@@ -1939,6 +2071,7 @@ async def api_correct_apply(payload: Dict[str, Any] = Body(...)):
         "ts": datetime.datetime.now().isoformat(),
         "session_txt": session_txt,
         "rules_version": rules.get("version"),
+        "model_name": session_model,
         "before_sha1": _sha1_text(before_text),
         "after_sha1": _sha1_text(after_text),
         "stats": stats,

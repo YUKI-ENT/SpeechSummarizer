@@ -18,7 +18,7 @@ def extract_rules(annotation_path: str, output_path: str, min_count: int = 1) ->
     records = [
         record
         for record in load_review_records(annotation_path)
-        if record.human_checked and record.human_is_boundary
+        if record.human_checked and record.human_has_boundary and record.human_boundary_index is not None
     ]
 
     trigger_counter: Counter[str] = Counter()
@@ -26,6 +26,14 @@ def extract_rules(annotation_path: str, output_path: str, min_count: int = 1) ->
 
     for record in records:
         phrases = record.human_trigger_phrases or record.llm_trigger_phrases
+        boundary_index = record.human_boundary_index
+        prev_text = ''
+        next_text = ''
+        if boundary_index is not None and 0 <= boundary_index < len(record.turns):
+            prev_text = record.turns[boundary_index].text
+        if boundary_index is not None and 0 <= boundary_index + 1 < len(record.turns):
+            next_text = record.turns[boundary_index + 1].text
+
         for phrase in phrases:
             normalized = _normalize_phrase(phrase)
             if not normalized:
@@ -35,8 +43,8 @@ def extract_rules(annotation_path: str, output_path: str, min_count: int = 1) ->
             if len(source_examples[normalized]) < 3:
                 source_examples[normalized].append({
                     'source_file': record.source_file,
-                    'prev_text': record.prev_text,
-                    'next_text': record.next_text,
+                    'prev_text': prev_text,
+                    'next_text': next_text,
                 })
 
     triggers = {

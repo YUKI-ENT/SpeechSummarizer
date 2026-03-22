@@ -64,6 +64,20 @@
     "temperature": 0.0,
     "top_p": 0.9,
     "default_prompt_id": "soap_v1",
+    "correction_tool_default_prompt_id": "correction_v1",
+    "correction_tool_prompts": {
+      "correction_v1": {
+        "label": "誤変換補正候補 v1",
+        "template": "以下は耳鼻科診察会話のASRテキストです。明らかな誤変換だけを高精度で抽出してください。返答はJSON配列のみで、各要素は{{\"wrong\":\"誤変換\",\"correct\":\"正しい語\",\"reason\":\"短い理由\"}}の形式。最大10件。自信が低いものは出さないでください。候補が1件でも必ず配列で返し、候補がなければ [] を返してください。説明文、Markdown、コードフェンス、<think> は出力しないでください。\n\n{transcript}\n"
+      }
+    },
+    "so_labeler_default_prompt_id": "boundary_v1",
+    "so_labeler_prompts": {
+      "boundary_v1": {
+        "label": "S/O境界判定 v1",
+        "template": "以下は耳鼻科診察会話の発話列です。目的は、prev_text と next_text の間で問診(S)から診察・所見(O)に切り替わるかを判定することです。\n\n判定の観点:\n- S: 症状確認、経過確認、問診、患者訴えの確認\n- O: 診察開始、観察、所見確認、身体診察への移行\n- 「見ていきますね」「お口開けて」「喉を見ます」のような診察開始の合図を重視する\n- 単なる相槌や言い換えでは境界にしない\n\ncontext_before:\n{context_before}\n\nprev_text:\n{prev_text}\n\nnext_text:\n{next_text}\n\ncontext_after:\n{context_after}\n"
+      }
+    },
 
     "prompts": {
       "soap_v1": {

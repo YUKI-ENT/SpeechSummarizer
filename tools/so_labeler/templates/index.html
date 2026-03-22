@@ -33,6 +33,10 @@
           <button id="btnList">jsonl 一覧取得</button>
         </div>
       </div>
+      <div class="action-row">
+        <button id="btnCheckAll" class="button-secondary">全選択</button>
+        <button id="btnUncheckAll" class="button-secondary">全解除</button>
+      </div>
       <p id="fileSummary" class="muted"></p>
       <div id="fileList" class="file-list"></div>
     </section>
@@ -79,7 +83,17 @@
             <option value="stub">Stub</option>
           </select>
         </div>
-        <div class="field span-2">
+        <div class="field">
+          <label for="llmModel">モデル</label>
+          <select id="llmModel"></select>
+        </div>
+        <div class="field">
+          <label for="promptId">プロンプト</label>
+          <select id="promptId"></select>
+        </div>
+      </div>
+      <div class="grid cols-1">
+        <div class="field">
           <label for="llmInfo">接続先</label>
           <input id="llmInfo" disabled>
         </div>
@@ -90,10 +104,11 @@
           <input id="outputPath" value="./output/so_boundary_annotations.jsonl">
         </div>
         <div class="field align-end">
-          <button id="btnAnalyze">LLM で仮判定を作成</button>
+          <button id="btnAnalyze">現在の1件を LLM で仮判定</button>
         </div>
       </div>
-      <p class="muted">各候補について、「この境界で S から O に移ったか」と「きっかけ句」を仮入力します。</p>
+      <p id="busyStatus" class="status-line" aria-live="polite"></p>
+      <p class="muted">表示中の 1 件だけ LLM に送り、結果を見ながら手作業で修正していく運用です。</p>
     </section>
 
     <section class="card review-card">

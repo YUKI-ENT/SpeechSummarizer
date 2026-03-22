@@ -23,6 +23,11 @@ body {
     var(--bg);
 }
 
+body.is-busy,
+body.is-busy * {
+  cursor: progress !important;
+}
+
 .page {
   max-width: 1180px;
   margin: 0 auto;
@@ -149,6 +154,21 @@ button:hover {
 .muted {
   color: var(--muted);
   font-size: 13px;
+}
+
+.status-line {
+  min-height: 20px;
+  margin: 10px 0 0;
+  color: var(--accent);
+  font-size: 13px;
+  font-weight: 700;
+}
+
+button:disabled,
+select:disabled,
+input:disabled {
+  opacity: 0.6;
+  cursor: not-allowed !important;
 }
 
 .file-list,
@@ -299,6 +319,42 @@ pre {
 
 .action-row {
   margin-top: 12px;
+}
+
+.transcript-column {
+  margin-top: 14px;
+}
+
+.transcript-list {
+  display: grid;
+  gap: 10px;
+}
+
+.turn-block {
+  display: grid;
+  gap: 8px;
+}
+
+.turn-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  flex-wrap: wrap;
+}
+
+.boundary-pick {
+  width: fit-content;
+  min-height: 36px;
+  padding: 8px 12px;
+  background: #f4efe4;
+  color: var(--ink);
+  border: 1px dashed #c7b79b;
+}
+
+.boundary-pick.is-active {
+  background: linear-gradient(135deg, var(--accent-2), #b45309);
+  color: #fff;
+  border-style: solid;
 }
 
 pre {

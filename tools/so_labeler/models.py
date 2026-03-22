@@ -4,7 +4,6 @@ from typing import Any, Literal, Optional
 
 from pydantic import BaseModel, Field
 
-PhaseLabel = Literal['S', 'O', 'UNKNOWN']
 BoundaryMode = Literal['stub', 'ollama']
 
 
@@ -19,53 +18,45 @@ class AsrEvent(BaseModel):
     meta: dict[str, Any] = Field(default_factory=dict)
 
 
-class BoundaryCandidate(BaseModel):
-    boundary_id: str
+class TranscriptTurn(BaseModel):
+    index: int
+    ts: str = ''
+    seg_id: Optional[int] = None
+    text: str
+
+
+class SessionCandidate(BaseModel):
+    session_id: str
     source_file: str
     patient_id: Optional[str] = None
-    event_index: int
-    prev_ts: str = ''
-    next_ts: str = ''
-    prev_text: str
-    next_text: str
-    context_before: list[str] = Field(default_factory=list)
-    context_after: list[str] = Field(default_factory=list)
-    prev_seg_id: Optional[int] = None
-    next_seg_id: Optional[int] = None
+    turns: list[TranscriptTurn] = Field(default_factory=list)
 
 
-class BoundaryLabelResult(BaseModel):
-    phase_before: PhaseLabel = 'UNKNOWN'
-    phase_after: PhaseLabel = 'UNKNOWN'
-    is_boundary: bool = False
+class SessionBoundaryLabelResult(BaseModel):
+    has_boundary: bool = False
+    boundary_index: Optional[int] = None
     confidence: float = Field(ge=0.0, le=1.0)
     trigger_text: str = ''
     trigger_phrases: list[str] = Field(default_factory=list)
     reason: str = ''
 
 
-class BoundaryReviewRecord(BaseModel):
-    boundary_id: str
+class SessionReviewRecord(BaseModel):
+    session_id: str
     source_file: str
     patient_id: Optional[str] = None
-    event_index: int
-    prev_ts: str = ''
-    next_ts: str = ''
-    prev_text: str
-    next_text: str
-    context_before: list[str] = Field(default_factory=list)
-    context_after: list[str] = Field(default_factory=list)
-    prev_seg_id: Optional[int] = None
-    next_seg_id: Optional[int] = None
+    turns: list[TranscriptTurn] = Field(default_factory=list)
     llm_mode: BoundaryMode = 'stub'
-    llm_phase_before: PhaseLabel = 'UNKNOWN'
-    llm_phase_after: PhaseLabel = 'UNKNOWN'
-    llm_is_boundary: bool = False
+    llm_model: str = ''
+    llm_prompt_id: str = ''
+    llm_has_boundary: bool = False
+    llm_boundary_index: Optional[int] = None
     llm_confidence: Optional[float] = None
     llm_trigger_text: str = ''
     llm_trigger_phrases: list[str] = Field(default_factory=list)
     llm_reason: str = ''
-    human_is_boundary: Optional[bool] = None
+    human_has_boundary: bool = False
+    human_boundary_index: Optional[int] = None
     human_trigger_phrases: list[str] = Field(default_factory=list)
     human_note: str = ''
     human_checked: bool = False
@@ -77,20 +68,20 @@ class FileListRequest(BaseModel):
     end_date: Optional[str] = None
 
 
-class BoundaryCandidateRequest(BaseModel):
+class SessionCandidateRequest(BaseModel):
     file_paths: list[str]
-    context_size: int = 3
-    max_candidates_per_file: int = 0
 
 
-class BatchBoundaryLabelRequest(BaseModel):
-    candidates: list[BoundaryCandidate]
+class BatchSessionLabelRequest(BaseModel):
+    sessions: list[SessionCandidate]
     mode: BoundaryMode = 'stub'
+    model: str = ''
+    prompt_id: str = ''
 
 
 class SaveReviewRequest(BaseModel):
     output_path: str
-    record: BoundaryReviewRecord
+    record: SessionReviewRecord
 
 
 class ExtractRuleRequest(BaseModel):
