@@ -132,15 +132,29 @@ CORRECTION_RULES_PATH = resolve_relpath(CFG.get("correction_rules_path", "correc
 CORRECTIONS_DIR = resolve_relpath(CFG.get("corrections_dir", "data/corrections"))
 ensure_dir(CORRECTIONS_DIR)
 _CORRECTION_CACHE: Optional[dict] = None
+_CORRECTION_CACHE_MTIME_NS: Optional[int] = None
 
 def load_correction_rules(force_reload: bool = False) -> dict:
-    global _CORRECTION_CACHE
-    if _CORRECTION_CACHE is not None and not force_reload:
+    global _CORRECTION_CACHE, _CORRECTION_CACHE_MTIME_NS
+
+    current_mtime_ns: Optional[int] = None
+    if CORRECTION_RULES_PATH.exists():
+        try:
+            current_mtime_ns = CORRECTION_RULES_PATH.stat().st_mtime_ns
+        except OSError:
+            current_mtime_ns = None
+
+    if (
+        _CORRECTION_CACHE is not None
+        and not force_reload
+        and _CORRECTION_CACHE_MTIME_NS == current_mtime_ns
+    ):
         return _CORRECTION_CACHE
 
     if not CORRECTION_RULES_PATH.exists():
         # ルールが無いなら「何もしない」扱いにする
         _CORRECTION_CACHE = {"version": None}
+        _CORRECTION_CACHE_MTIME_NS = None
         return _CORRECTION_CACHE
 
     with CORRECTION_RULES_PATH.open("r", encoding="utf-8") as f:
@@ -150,6 +164,7 @@ def load_correction_rules(force_reload: bool = False) -> dict:
         raise ValueError("corrections.json must be an object")
 
     _CORRECTION_CACHE = rules
+    _CORRECTION_CACHE_MTIME_NS = current_mtime_ns
     return rules
 
 
@@ -196,12 +211,19 @@ def _effective_correction_rules(rules: dict, model_name: Optional[str] = None) -
 
 def detect_asr_model_from_jsonl(jsonl_path: Path) -> Optional[str]:
     counts: dict[str, int] = {}
+    session_start_model: Optional[str] = None
     try:
         with jsonl_path.open("r", encoding="utf-8") as f:
             for line in f:
                 if not line.strip():
                     continue
                 row = json.loads(line)
+                if row.get("type") == "session_start":
+                    meta = row.get("meta") or {}
+                    asr_meta = meta.get("asr") or {}
+                    model_name = str(asr_meta.get("model_name") or "").strip()
+                    if model_name and not session_start_model:
+                        session_start_model = model_name
                 if row.get("type") != "asr":
                     continue
                 asr_cfg = row.get("asr_cfg") or {}
@@ -212,7 +234,7 @@ def detect_asr_model_from_jsonl(jsonl_path: Path) -> Optional[str]:
     except Exception:
         return None
     if not counts:
-        return None
+        return session_start_model
     return max(counts.items(), key=lambda item: item[1])[0]
 
 def _sha1_text(s: str) -> str:

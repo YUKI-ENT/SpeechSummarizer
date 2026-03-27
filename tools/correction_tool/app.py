@@ -53,6 +53,12 @@ class SuggestRequest(BaseModel):
     turns: list[dict[str, Any]]
     model: str = ""
     prompt_id: str = ""
+    model_name: str = ""
+
+
+class AnnotateRequest(BaseModel):
+    turns: list[dict[str, Any]]
+    model_name: str = ""
 
 
 class RuleUpsertRequest(BaseModel):
@@ -67,6 +73,29 @@ class RuleDeleteRequest(BaseModel):
 
 
 SUGGEST_CHUNK_SIZE = 4
+
+
+def _load_patient_info_map(path: Path) -> dict[str, dict[str, Any]]:
+    if not path.exists():
+        return {}
+    out: dict[str, dict[str, Any]] = {}
+    try:
+        with path.open("r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    row = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                patient_id = str(row.get("patient_id") or "").strip()
+                if not patient_id:
+                    continue
+                out[patient_id] = row
+    except OSError:
+        return out
+    return out
 
 
 def _debug_log(message: str) -> None:
@@ -138,11 +167,249 @@ def _effective_replacements(rules: dict, model_name: str = "") -> dict[str, str]
     return out
 
 
-def _apply_preview(text: str, rules: dict, model_name: str = "") -> str:
-    out = text
-    for wrong, correct in _effective_replacements(rules, model_name).items():
-        out = out.replace(wrong, correct)
+def _effective_rules(rules: dict, model_name: str = "") -> dict[str, Any]:
+    effective = dict(rules or {})
+    model_rules = effective.pop("model_rules", None) or {}
+    scoped = model_rules.get(model_name or "", {}) if isinstance(model_rules, dict) else {}
+    if not isinstance(scoped, dict):
+        scoped = {}
+
+    base_replacements = effective.get("replacements") or {}
+    scoped_replacements = scoped.get("replacements") or {}
+    effective["replacements"] = {
+        **(base_replacements if isinstance(base_replacements, dict) else {}),
+        **(scoped_replacements if isinstance(scoped_replacements, dict) else {}),
+    }
+
+    base_regex = effective.get("regex_replacements") or []
+    scoped_regex = scoped.get("regex_replacements") or []
+    effective["regex_replacements"] = [
+        *(base_regex if isinstance(base_regex, list) else []),
+        *(scoped_regex if isinstance(scoped_regex, list) else []),
+    ]
+
+    base_blacklist = effective.get("blacklist_words") or []
+    scoped_blacklist = scoped.get("blacklist_words") or []
+    effective["blacklist_words"] = [
+        *(base_blacklist if isinstance(base_blacklist, list) else []),
+        *(scoped_blacklist if isinstance(scoped_blacklist, list) else []),
+    ]
+
+    base_drop = effective.get("drop_regex") or []
+    scoped_drop = scoped.get("drop_regex") or []
+    effective["drop_regex"] = [
+        *(base_drop if isinstance(base_drop, list) else []),
+        *(scoped_drop if isinstance(scoped_drop, list) else []),
+    ]
+
+    if "min_chars_per_line" in scoped:
+        effective["min_chars_per_line"] = scoped.get("min_chars_per_line")
+    return effective
+
+
+def _compile_regex_replacements(rules: dict) -> list[tuple[re.Pattern[str], str]]:
+    compiled = []
+    for item in rules.get("regex_replacements") or []:
+        if not isinstance(item, dict):
+            continue
+        pattern = item.get("pattern")
+        repl = item.get("repl", "")
+        if not isinstance(pattern, str):
+            continue
+        try:
+            compiled.append((re.compile(pattern), str(repl)))
+        except re.error:
+            continue
+    return compiled
+
+
+def _slice_segments(segments: list[dict[str, Any]], start: int, end: int) -> list[dict[str, Any]]:
+    if start >= end:
+        return []
+    out: list[dict[str, Any]] = []
+    cursor = 0
+    for seg in segments:
+        text = str(seg.get("text") or "")
+        next_cursor = cursor + len(text)
+        if next_cursor <= start:
+            cursor = next_cursor
+            continue
+        if cursor >= end:
+            break
+        sub_start = max(start, cursor) - cursor
+        sub_end = min(end, next_cursor) - cursor
+        if sub_start < sub_end:
+            out.append({"text": text[sub_start:sub_end], "changed": bool(seg.get("changed"))})
+        cursor = next_cursor
     return out
+
+
+def _merge_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    merged: list[dict[str, Any]] = []
+    for seg in segments:
+        text = str(seg.get("text") or "")
+        if not text:
+            continue
+        changed = bool(seg.get("changed"))
+        if merged and bool(merged[-1].get("changed")) == changed:
+            merged[-1]["text"] = str(merged[-1].get("text") or "") + text
+        else:
+            merged.append({"text": text, "changed": changed})
+    return merged
+
+
+def _strip_segments(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    text = "".join(str(seg.get("text") or "") for seg in segments)
+    if not text:
+        return []
+    start = len(text) - len(text.lstrip())
+    end = len(text.rstrip())
+    if start >= end:
+        return []
+    return _merge_segments(_slice_segments(segments, start, end))
+
+
+def _apply_literal_segments(segments: list[dict[str, Any]], wrong: str, correct: str) -> list[dict[str, Any]]:
+    if not wrong:
+        return segments
+    text = "".join(str(seg.get("text") or "") for seg in segments)
+    result: list[dict[str, Any]] = []
+    cursor = 0
+    while True:
+        idx = text.find(wrong, cursor)
+        if idx < 0:
+            result.extend(_slice_segments(segments, cursor, len(text)))
+            break
+        result.extend(_slice_segments(segments, cursor, idx))
+        if correct:
+            result.append({"text": correct, "changed": True})
+        cursor = idx + len(wrong)
+    return _merge_segments(result)
+
+
+def _apply_regex_segments(segments: list[dict[str, Any]], cre: re.Pattern[str], repl: str) -> list[dict[str, Any]]:
+    text = "".join(str(seg.get("text") or "") for seg in segments)
+    result: list[dict[str, Any]] = []
+    cursor = 0
+    for match in cre.finditer(text):
+        start, end = match.span()
+        if start == end:
+            continue
+        result.extend(_slice_segments(segments, cursor, start))
+        replaced = match.expand(repl)
+        if replaced:
+            result.append({"text": replaced, "changed": True})
+        cursor = end
+    result.extend(_slice_segments(segments, cursor, len(text)))
+    return _merge_segments(result)
+
+
+def _annotate_text(text: str, rules: dict, model_name: str = "") -> dict[str, Any]:
+    effective = _effective_rules(rules, model_name)
+    segments: list[dict[str, Any]] = [{"text": str(text or ""), "changed": False}]
+
+    for wrong, correct in (effective.get("replacements") or {}).items():
+        if isinstance(wrong, str) and isinstance(correct, str):
+            segments = _apply_literal_segments(segments, wrong, correct)
+
+    for cre, repl in _compile_regex_replacements(effective):
+        segments = _apply_regex_segments(segments, cre, repl)
+
+    merged = _merge_segments(segments)
+    return {
+        "text": "".join(str(seg.get("text") or "") for seg in merged),
+        "segments": merged,
+        "changed": any(bool(seg.get("changed")) for seg in merged),
+    }
+
+
+def _annotate_preview_text(text: str, rules: dict, model_name: str = "") -> dict[str, Any]:
+    if not text:
+        return {"text": "", "segments": [], "changed": False, "visible": False}
+
+    effective = _effective_rules(rules, model_name)
+    segments: list[dict[str, Any]] = [{"text": str(text or ""), "changed": False}]
+
+    for wrong, correct in (effective.get("replacements") or {}).items():
+        if isinstance(wrong, str) and isinstance(correct, str):
+            segments = _apply_literal_segments(segments, wrong, correct)
+
+    for cre, repl in _compile_regex_replacements(effective):
+        segments = _apply_regex_segments(segments, cre, repl)
+
+    for word in effective.get("blacklist_words") or []:
+        if isinstance(word, str) and word:
+            segments = _apply_literal_segments(segments, word, "")
+
+    merged = _strip_segments(_merge_segments(segments))
+    text_out = "".join(str(seg.get("text") or "") for seg in merged)
+
+    drop_regex: list[re.Pattern[str]] = []
+    for pattern in effective.get("drop_regex") or []:
+        try:
+            drop_regex.append(re.compile(pattern))
+        except re.error:
+            continue
+
+    try:
+        min_chars = int(effective.get("min_chars_per_line") or 0)
+    except (TypeError, ValueError):
+        min_chars = 0
+
+    visible = bool(text_out)
+    if visible and min_chars > 0 and len(text_out) < min_chars:
+        visible = False
+    if visible and any(cre.match(text_out) for cre in drop_regex):
+        visible = False
+
+    return {
+        "text": text_out,
+        "segments": merged if visible else [],
+        "changed": any(bool(seg.get("changed")) for seg in merged),
+        "visible": visible,
+    }
+
+
+def _apply_preview(text: str, rules: dict, model_name: str = "") -> str:
+    if not text:
+        return ""
+    effective = _effective_rules(rules, model_name)
+    replacements = effective.get("replacements") or {}
+    regex_replacements = _compile_regex_replacements(effective)
+    blacklist = effective.get("blacklist_words") or []
+    drop_regex = []
+    for pattern in effective.get("drop_regex") or []:
+        try:
+            drop_regex.append(re.compile(pattern))
+        except re.error:
+            continue
+    try:
+        min_chars = int(effective.get("min_chars_per_line") or 0)
+    except (TypeError, ValueError):
+        min_chars = 0
+
+    lines = []
+    for raw_line in str(text).splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        for wrong, correct in replacements.items():
+            if isinstance(wrong, str) and isinstance(correct, str) and wrong:
+                line = line.replace(wrong, correct)
+        for cre, repl in regex_replacements:
+            line = cre.sub(repl, line)
+        for word in blacklist:
+            if isinstance(word, str) and word:
+                line = line.replace(word, "")
+        line = line.strip()
+        if not line:
+            continue
+        if min_chars > 0 and len(line) < min_chars:
+            continue
+        if any(cre.match(line) for cre in drop_regex):
+            continue
+        lines.append(line)
+    return "\n".join(lines)
 
 
 def _list_jsonl_files(data_dir: str, start_date: Optional[str], end_date: Optional[str]) -> list[dict]:
@@ -152,7 +419,14 @@ def _list_jsonl_files(data_dir: str, start_date: Optional[str], end_date: Option
     start_dt = _parse_date_text(start_date)
     end_dt = _parse_date_text(end_date)
     out = []
-    for path in sorted(root.rglob("*.jsonl")):
+    candidates = []
+    for path in root.rglob("*.jsonl"):
+        try:
+            mtime = path.stat().st_mtime
+        except OSError:
+            mtime = 0.0
+        candidates.append((mtime, path))
+    for _, path in sorted(candidates, key=lambda item: item[0], reverse=True):
         if path.name in EXCLUDED_JSONL_NAMES:
             continue
         session_ts = None
@@ -421,8 +695,39 @@ def api_files(req: FileListRequest):
 
 
 @app.post("/api/sessions")
-def api_sessions(req: SessionLoadRequest):
-    return {"items": [_load_session(path) for path in req.file_paths]}
+def api_sessions(request: Request, req: SessionLoadRequest):
+    patient_data_path = Path(
+        getattr(
+            request.app.state,
+            "patient_data_path",
+            Path(getattr(request.app.state, "default_data_dir", BASE_DIR.parent.parent / "data")) / "patient_data.jsonl",
+        )
+    )
+    patient_info_map = _load_patient_info_map(patient_data_path)
+    items = []
+    for path in req.file_paths:
+        session = _load_session(path)
+        pid = str(session.get("patient_id") or "").strip()
+        session["patient_info"] = patient_info_map.get(pid) if pid else None
+        items.append(session)
+    return {"items": items}
+
+
+@app.post("/api/annotate")
+def api_annotate(request: Request, req: AnnotateRequest):
+    rules_path = Path(getattr(request.app.state, "correction_rules_path", BASE_DIR.parent.parent / "corrections.json"))
+    rules = _load_rules(rules_path)
+    items = []
+    for turn in req.turns:
+        annotated = _annotate_preview_text(str(turn.get("text") or ""), rules, req.model_name)
+        items.append({
+            "index": turn.get("index"),
+            "text": annotated["text"],
+            "segments": annotated["segments"],
+            "changed": annotated["changed"],
+            "visible": annotated["visible"],
+        })
+    return {"ok": True, "items": items}
 
 
 @app.get("/api/rules")
@@ -447,15 +752,24 @@ def api_preview(request: Request, payload: dict[str, Any]):
 
 @app.post("/api/suggest")
 def api_suggest(request: Request, req: SuggestRequest):
-    chunks = _chunk_turns(req.turns)
-    transcript = _transcript_from_turns(req.turns)
+    rules_path = Path(getattr(request.app.state, "correction_rules_path", BASE_DIR.parent.parent / "corrections.json"))
+    rules = _load_rules(rules_path)
+    corrected_turns = []
+    for turn in req.turns:
+        corrected_turns.append({
+            **turn,
+            "text": _apply_preview(str(turn.get("text") or ""), rules, req.model_name),
+        })
+    chunks = _chunk_turns(corrected_turns)
+    transcript = _transcript_from_turns(corrected_turns)
     _debug_dump(
         "[correction_tool][suggest_request]",
         {
             "source_file": req.source_file,
             "model": req.model,
+            "model_name": req.model_name,
             "prompt_id": req.prompt_id,
-            "turn_count": len(req.turns),
+            "turn_count": len(corrected_turns),
             "chunk_size": SUGGEST_CHUNK_SIZE,
             "chunk_count": len(chunks),
             "transcript_chars": len(transcript),
