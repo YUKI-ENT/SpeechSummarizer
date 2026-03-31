@@ -38,6 +38,22 @@ function Wait-UntilFileUnlocked([string]$Path, [int]$TimeoutSeconds = 30) {
   throw "Timed out waiting for file to unlock: $Path"
 }
 
+function Remove-TreeWithRetry([string]$Path, [int]$MaxAttempts = 5) {
+  if (!(Test-Path $Path)) { return }
+
+  for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
+    try {
+      Remove-Item $Path -Recurse -Force
+      return
+    }
+    catch [System.IO.IOException] {
+      if ($attempt -eq $MaxAttempts) { throw }
+      Write-Host "[clean] retry $attempt/$MaxAttempts after file lock: $Path"
+      Start-Sleep -Seconds 2
+    }
+  }
+}
+
 function Compress-ArchiveWithRetry(
   [string]$SourcePath,
   [string]$DestinationPath,
@@ -69,8 +85,8 @@ try {
   $py = (Get-Command python -ErrorAction Stop).Source
   Write-Host "[build] python=$py"
 
-  if (Test-Path $DistDir) { Remove-Item $DistDir -Recurse -Force }
-  if (Test-Path $BuildDir) { Remove-Item $BuildDir -Recurse -Force }
+  Remove-TreeWithRetry $DistDir
+  Remove-TreeWithRetry $BuildDir
 
   Write-Host "[build] PyInstaller onedir..."
   python -m PyInstaller `
@@ -78,6 +94,12 @@ try {
     --onedir `
     --windowed `
     --name $Name `
+    --add-data "tools\analysis_tools\static;tools\analysis_tools\static" `
+    --add-data "tools\analysis_tools\templates;tools\analysis_tools\templates" `
+    --add-data "tools\correction_tool\static;tools\correction_tool\static" `
+    --add-data "tools\correction_tool\templates;tools\correction_tool\templates" `
+    --add-data "tools\so_labeler\static;tools\so_labeler\static" `
+    --add-data "tools\so_labeler\templates;tools\so_labeler\templates" `
     $Entry
 
   $AppDir = Join-Path $DistDir $Name

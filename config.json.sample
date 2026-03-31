@@ -10,6 +10,9 @@
   "llm_outputs_dir": "data/llm",
   "correction_rules_path": "./corrections.json",
   "wav_expire_days": 7,
+  "windows_launcher": {
+    "auto_start_server": false
+  },
   
   "port": 8000,
 

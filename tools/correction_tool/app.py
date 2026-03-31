@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import re
+import sys
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -16,8 +17,21 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 BASE_DIR = Path(__file__).resolve().parent
-STATIC_DIR = BASE_DIR / "static"
-TEMPLATE_DIR = BASE_DIR / "templates"
+
+
+def _resolve_resource_dir(name: str) -> Path:
+    candidates = [BASE_DIR / name]
+    if getattr(sys, "frozen", False):
+        app_dir = Path(sys.executable).resolve().parent
+        candidates.append(app_dir / "tools" / BASE_DIR.name / name)
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate
+    return candidates[0]
+
+
+STATIC_DIR = _resolve_resource_dir("static")
+TEMPLATE_DIR = _resolve_resource_dir("templates")
 EXCLUDED_JSONL_NAMES = {"patient_data.jsonl"}
 CORRECTION_RESPONSE_SUFFIX = (
     "\n\n出力ルール:\n"

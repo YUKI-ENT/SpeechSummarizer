@@ -81,8 +81,8 @@ class LauncherApp:
     def __init__(self, root: tk.Tk):
         self.root = root
         self.root.title("SpeechSummarizer Launcher")
-        self.root.geometry("1040x820")
-        self.root.minsize(900, 720)
+        self.root.geometry("1120x900")
+        self.root.minsize(980, 780)
 
         self.proc: subprocess.Popen | None = None
         self.log_queue: queue.Queue[str] = queue.Queue()
@@ -90,12 +90,14 @@ class LauncherApp:
         self.field_meta: dict[str, dict] = {}
         self.model_rows: list[tuple[tk.StringVar, tk.StringVar]] = []
         self.prompt_rows: list[tuple[tk.StringVar, tk.StringVar, ScrolledText]] = []
+        self._auto_start_attempted = False
 
         self.cfg = load_config()
         self._build_ui()
         self._load_form_from_config()
         self._update_status()
         self._poll_log_queue()
+        self.root.after(150, self._maybe_auto_start_server)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
     def _build_ui(self) -> None:
@@ -128,23 +130,29 @@ class LauncherApp:
         self.btn_open = ttk.Button(btns, text="ブラウザで開く", command=self.open_browser)
         self.btn_open.pack(side="left", padx=(8, 0))
 
-        notebook = ttk.Notebook(outer)
+        main_pane = ttk.Panedwindow(outer, orient="vertical")
+        main_pane.pack(fill="both", expand=True)
+
+        upper = ttk.Frame(main_pane)
+        lower = ttk.Frame(main_pane, padding=(0, 10, 0, 0))
+        main_pane.add(upper, weight=4)
+        main_pane.add(lower, weight=2)
+
+        notebook = ttk.Notebook(upper)
         notebook.pack(fill="both", expand=True)
 
         general_tab = ttk.Frame(notebook, padding=12)
         asr_tab = ttk.Frame(notebook, padding=12)
         llm_tab = ttk.Frame(notebook, padding=12)
-        log_tab = ttk.Frame(notebook, padding=12)
 
         notebook.add(general_tab, text="一般")
         notebook.add(asr_tab, text="ASR")
         notebook.add(llm_tab, text="LLM")
-        notebook.add(log_tab, text="ログ")
 
         self._build_general_tab(general_tab)
         self._build_asr_tab(asr_tab)
         self._build_llm_tab(llm_tab)
-        self._build_log_tab(log_tab)
+        self._build_log_panel(lower)
 
     def _build_general_tab(self, parent: ttk.Frame) -> None:
         for i in range(3):
@@ -162,6 +170,8 @@ class LauncherApp:
         self._add_path_entry(parent, "llm_outputs_dir", "LLM保存先", ("llm_outputs_dir",), row=row, select="dir")
         row += 1
         self._add_entry(parent, "wav_expire_days", "WAV保持日数", ("wav_expire_days",), kind="int", row=row, width=12)
+        row += 1
+        self._add_bool(parent, "windows_auto_start_server", "Windows GUI起動時にサーバーも自動起動", ("windows_launcher", "auto_start_server"), row=row)
         row += 1
         self._add_bool(parent, "ssl_enabled", "SSL有効", ("ssl", "enabled"), row=row)
         row += 1
@@ -298,8 +308,11 @@ class LauncherApp:
         btn_row.grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Button(btn_row, text="追加", command=self.add_prompt_row).pack(side="left")
 
-    def _build_log_tab(self, parent: ttk.Frame) -> None:
-        self.log_text = ScrolledText(parent, height=30, wrap="word")
+    def _build_log_panel(self, parent: ttk.Frame) -> None:
+        panel = ttk.LabelFrame(parent, text="サーバーログ", padding=10)
+        panel.pack(fill="both", expand=True)
+
+        self.log_text = ScrolledText(panel, height=14, wrap="word")
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(state="disabled")
 
@@ -545,6 +558,20 @@ class LauncherApp:
         threading.Thread(target=self._read_process_output, daemon=True).start()
         self._append_log(f"[launcher] server start: {' '.join(cmd)}")
         self._update_status()
+
+    def _maybe_auto_start_server(self) -> None:
+        if self._auto_start_attempted:
+            return
+        self._auto_start_attempted = True
+
+        auto_start = bool(get_nested(self.cfg, ("windows_launcher", "auto_start_server"), False))
+        if not auto_start:
+            return
+        if self.proc and self.proc.poll() is None:
+            return
+
+        self._append_log("[launcher] auto start enabled: starting server")
+        self.start_server()
 
     def stop_server(self) -> None:
         if not self.proc or self.proc.poll() is not None:

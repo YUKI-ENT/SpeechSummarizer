@@ -5,7 +5,7 @@ a = Analysis(
     ['launcher.py'],
     pathex=[],
     binaries=[],
-    datas=[],
+    datas=[('tools\\analysis_tools\\static', 'tools\\analysis_tools\\static'), ('tools\\analysis_tools\\templates', 'tools\\analysis_tools\\templates'), ('tools\\correction_tool\\static', 'tools\\correction_tool\\static'), ('tools\\correction_tool\\templates', 'tools\\correction_tool\\templates'), ('tools\\so_labeler\\static', 'tools\\so_labeler\\static'), ('tools\\so_labeler\\templates', 'tools\\so_labeler\\templates')],
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
