@@ -66,6 +66,19 @@ CONFIG_SAMPLE_PATH = APP_DIR / "config.json.sample"
 
 _CONFIG_CACHE: Optional[dict] = None
 
+
+def ensure_file_from_sample(path: Path) -> None:
+    sample_path = path.with_name(f"{path.name}.sample")
+    if path.exists():
+        return
+    if not sample_path.exists():
+        return
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copyfile(sample_path, path)
+    except Exception as e:
+        raise RuntimeError(f"failed to copy {sample_path.name} -> {path.name}: {e}")
+
 def load_config(force_reload: bool = False) -> dict:
     global _CONFIG_CACHE
 
@@ -136,6 +149,8 @@ _CORRECTION_CACHE_MTIME_NS: Optional[int] = None
 
 def load_correction_rules(force_reload: bool = False) -> dict:
     global _CORRECTION_CACHE, _CORRECTION_CACHE_MTIME_NS
+
+    ensure_file_from_sample(CORRECTION_RULES_PATH)
 
     current_mtime_ns: Optional[int] = None
     if CORRECTION_RULES_PATH.exists():

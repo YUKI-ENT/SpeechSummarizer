@@ -117,7 +117,7 @@ try {
 
   $itemsToCopy = @(
     "config.json.sample",
-    "corrections.json",
+    "corrections.json.sample",
     "static",
     "certs"
   )

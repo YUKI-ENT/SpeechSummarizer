@@ -6,6 +6,7 @@ from collections import Counter
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Optional
+import shutil
 
 import requests
 from fastapi import FastAPI, HTTPException, Request
@@ -139,7 +140,18 @@ def _parse_date_text(value: Optional[str]):
     return datetime.strptime(value, "%Y-%m-%d")
 
 
+def _ensure_file_from_sample(path: Path) -> None:
+    sample_path = path.with_name(f"{path.name}.sample")
+    if path.exists():
+        return
+    if not sample_path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(sample_path, path)
+
+
 def _load_rules(path: Path) -> dict:
+    _ensure_file_from_sample(path)
     if not path.exists():
         return {"version": None, "replacements": {}, "model_rules": {}}
     with path.open("r", encoding="utf-8") as f:

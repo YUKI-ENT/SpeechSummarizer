@@ -29,7 +29,7 @@ SpeechSummarizer/
 ├─ SpeechSummarizer.exe
 ├─ _internal/
 ├─ config.json.sample
-├─ correct.json
+├─ corrections.json.sample
 ├─ static/
 ├─ cert/
 └─ models/
@@ -55,7 +55,7 @@ pip install -r requirements.txt
 ※ Linux環境では、CUDAランタイムをシステムにインストールするとドライババージョンや他のアプリケーションと干渉し起動できなくなることがあるので、下記の[【補足】GPU (CUDA) 利用方法（Linux）](https://github.com/YUKI-ENT/SpeechSummarizer/edit/main/README.md#%E8%A3%9C%E8%B6%B3gpu-cuda-%E5%88%A9%E7%94%A8%E6%96%B9%E6%B3%95linux) を推奨します。
 
 ## config.jsonの設定（Windows版ではGUIから編集可能）
-インストールフォルダに有る`config.json.sample`を`config.json`に名前を変えるかコピーし、環境に合わせて編集します。
+インストールフォルダに有る`config.json.sample`を`config.json`に名前を変えるかコピーし、環境に合わせて編集します。`corrections.json` も初回起動時に `corrections.json.sample` から自動生成されます。
 
 必須の項目は、
 - \"asr\": セクション
