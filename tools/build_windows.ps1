@@ -1,11 +1,8 @@
 # tools/build_windows.ps1
-# Windows 用: venv作成 → 依存導入 → PyInstaller(onedir) → VC++ DLL削除 → zip作成
-# 使い方:
+# Windows build: PyInstaller (onedir) -> trim VC++ runtime DLLs -> copy assets -> zip
+# Usage:
 #   .\tools\build_windows.ps1
-# models を同梱しないなら：
-#   .\tools\build_windows.ps1  -IncludeModels $false
-# オプション:
-#   -PythonExe "py" -PythonVersion "3.12" -Clean -NoZip
+#   .\tools\build_windows.ps1 -IncludeModels $false
 
 param(
   [string]$Name = "SpeechSummarizer",
@@ -13,17 +10,17 @@ param(
   [string]$DistDir = "dist",
   [string]$BuildDir = "build",
   [string]$OutDir = "release",
-  [bool]$IncludeModels = $true   # models/を同梱しないなら -IncludeModels:$false
+  [bool]$IncludeModels = $true
 )
 
 $ErrorActionPreference = "Stop"
 Set-StrictMode -Version Latest
 
-function Assert-Exists([string]$Path){
+function Assert-Exists([string]$Path) {
   if (!(Test-Path $Path)) { throw "Not found: $Path" }
 }
 
-function Wait-UntilFileUnlocked([string]$Path, [int]$TimeoutSeconds = 30){
+function Wait-UntilFileUnlocked([string]$Path, [int]$TimeoutSeconds = 30) {
   if (!(Test-Path $Path)) { return }
 
   $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
@@ -45,7 +42,7 @@ function Compress-ArchiveWithRetry(
   [string]$SourcePath,
   [string]$DestinationPath,
   [int]$MaxAttempts = 5
-){
+) {
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     try {
       Compress-Archive -Path $SourcePath -DestinationPath $DestinationPath -Force
@@ -54,31 +51,27 @@ function Compress-ArchiveWithRetry(
     catch [System.IO.IOException] {
       if ($attempt -eq $MaxAttempts) { throw }
       Write-Host "[zip] retry $attempt/$MaxAttempts after file lock"
-      if (Test-Path $DestinationPath) { Remove-Item $DestinationPath -Force -ErrorAction SilentlyContinue }
+      if (Test-Path $DestinationPath) {
+        Remove-Item $DestinationPath -Force -ErrorAction SilentlyContinue
+      }
       Start-Sleep -Seconds 2
     }
   }
 }
 
-# どこから実行されても repo ルートに合わせる
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-$RepoRoot  = Resolve-Path (Join-Path $ScriptDir "..")
+$RepoRoot = Resolve-Path (Join-Path $ScriptDir "..")
 Push-Location $RepoRoot
 
 try {
   Assert-Exists $Entry
 
-  # 依存の前提：venvはユーザーが手動で有効化済み、pyinstallerも入っていること
   $py = (Get-Command python -ErrorAction Stop).Source
   Write-Host "[build] python=$py"
 
-  # 既存成果物を掃除（onedirはdist/$Name配下が本体なので、そこを消す）
-  if (Test-Path $DistDir)  { Remove-Item $DistDir  -Recurse -Force }
+  if (Test-Path $DistDir) { Remove-Item $DistDir -Recurse -Force }
   if (Test-Path $BuildDir) { Remove-Item $BuildDir -Recurse -Force }
 
-  # --- PyInstaller: onedir ---
-  # 既に spec を使っているなら、この行を spec 呼び出しに置き換えてOK
-  # 例: python -m PyInstaller --noconfirm --clean "$Name.spec"
   Write-Host "[build] PyInstaller onedir..."
   python -m PyInstaller `
     --noconfirm --clean `
@@ -90,9 +83,7 @@ try {
   $AppDir = Join-Path $DistDir $Name
   Assert-Exists $AppDir
 
-  # --- VC++ Runtime DLL削除（衝突回避） ---
   $internalDir = Join-Path $AppDir "_internal"
-
   if (Test-Path $internalDir) {
     $vcDlls = @(
       "msvcp140.dll",
@@ -111,8 +102,6 @@ try {
     }
   }
 
-  # --- 配布用ファイルを exe と同階層にコピー ---
-  # ここが今回の修正ポイント
   Write-Host "[pack] Copy assets into $AppDir"
 
   $itemsToCopy = @(
@@ -124,32 +113,24 @@ try {
 
   if ($IncludeModels) { $itemsToCopy += "models" }
 
-  # config.json.sample → config.json としてコピー
-  Remove-Item (Join-Path $AppDir "config.json") -ErrorAction SilentlyContinue
-  if (Test-Path "config.json.sample") {
-    Copy-Item "config.json.sample" -Destination (Join-Path $AppDir "config.json") -Force
-    Write-Host "[pack] copied: config.json.sample -> config.json"
-  } else {
-    Write-Host "[pack] skip (config.json.sample not found)"
+  # Do not ship config.json. The app creates it from config.json.sample
+  # only when missing, so user settings are not overwritten on upgrade.
+  $packagedConfig = Join-Path $AppDir "config.json"
+  if (Test-Path $packagedConfig) {
+    Remove-Item $packagedConfig -Force
+    Write-Host "[pack] removed: config.json"
   }
-
-  # if (Test-Path "config.json.sample") {
-  #   Copy-Item "config.json.sample" -Destination (Join-Path $AppDir "config.json") -Force
-  #   Write-Host "[pack] copied: config.json.sample -> config.json"
-  # } else {
-  #   Write-Host "[pack] skip (config.json.sample not found)"
-  # }
 
   foreach ($it in $itemsToCopy) {
     if (Test-Path $it) {
       Copy-Item $it -Destination $AppDir -Recurse -Force
       Write-Host ("[pack] copied: " + $it)
-    } else {
+    }
+    else {
       Write-Host ("[pack] skip (not found): " + $it)
     }
   }
 
-  # --- ZIP作成 ---
   if (!(Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }
 
   $stamp = Get-Date -Format "yyyyMMdd_HHmmss"
