@@ -1,7 +1,6 @@
 import json
 import locale
 import queue
-import re
 import shutil
 import subprocess
 import sys
@@ -11,6 +10,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
+from version import APP_VERSION
 
 
 def get_app_dir() -> Path:
@@ -22,8 +22,6 @@ def get_app_dir() -> Path:
 APP_DIR = get_app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 CONFIG_SAMPLE_PATH = APP_DIR / "config.json.sample"
-APP_PY_PATH = APP_DIR / "app.py"
-APP_VERSION_PATTERN = re.compile(r'^\s*APP_VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 PATH_KEYS = {
     ("dyna_watch_dir",),
     ("outputs_dir",),
@@ -33,18 +31,6 @@ PATH_KEYS = {
     ("ssl", "keyfile"),
 }
 MODEL_PATH_PREFIX = ("asr", "models")
-
-
-def load_app_version() -> str:
-    try:
-        text = APP_PY_PATH.read_text(encoding="utf-8")
-    except OSError:
-        return "-"
-    match = APP_VERSION_PATTERN.search(text)
-    return match.group(1) if match else "-"
-
-
-APP_VERSION = load_app_version()
 
 
 def ensure_config_file() -> None:
@@ -182,9 +168,6 @@ class LauncherApp:
         ttk.Label(title_box, text="SpeechSummarizer", font=("", 16, "bold")).pack(side="left")
         ttk.Label(title_box, text=f"ver {APP_VERSION}").pack(side="left", padx=(10, 0))
 
-        self.status_var = tk.StringVar(value="停止中")
-        ttk.Label(top, textvariable=self.status_var).pack(side="right")
-
         btns = ttk.Frame(outer)
         btns.pack(fill="x", pady=(10, 10))
 
@@ -202,6 +185,14 @@ class LauncherApp:
 
         self.btn_open = ttk.Button(btns, text="ブラウザで開く", command=self.open_browser)
         self.btn_open.pack(side="left", padx=(8, 0))
+
+        status_box = ttk.Frame(btns)
+        status_box.pack(side="left", padx=(18, 0))
+        self.status_indicator = tk.Canvas(status_box, width=20, height=20, highlightthickness=0, borderwidth=0)
+        self.status_indicator.pack(side="left", padx=(0, 8))
+        self.status_indicator_oval = self.status_indicator.create_oval(2, 2, 18, 18, outline="", fill="#9ca3af")
+        self.status_var = tk.StringVar(value="停止中")
+        ttk.Label(status_box, textvariable=self.status_var, font=("", 11, "bold")).pack(side="left")
 
         main_pane = ttk.Panedwindow(outer, orient="vertical")
         main_pane.pack(fill="both", expand=True)
@@ -695,6 +686,7 @@ class LauncherApp:
     def _update_status(self) -> None:
         running = self.proc is not None and self.proc.poll() is None
         self.status_var.set("起動中" if running else "停止中")
+        self.status_indicator.itemconfigure(self.status_indicator_oval, fill="#16a34a" if running else "#9ca3af")
         self.btn_start.configure(state="disabled" if running else "normal")
         self.btn_stop.configure(state="normal" if running else "disabled")
 

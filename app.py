@@ -15,6 +15,7 @@ from urllib.parse import unquote
 import re
 import shutil
 from typing import Any, Dict, List, Optional
+from version import APP_VERSION
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
@@ -48,8 +49,6 @@ import hashlib
 # App version (server software version)
 # -------------------------
 # ここを書き換えるだけでUI表示が変わる（config.json には置かない）
-APP_VERSION = "20260331"
-
 # -------------------------
 # Config
 # -------------------------
