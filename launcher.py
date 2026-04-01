@@ -1,6 +1,7 @@
 import json
 import locale
 import queue
+import re
 import shutil
 import subprocess
 import sys
@@ -21,6 +22,8 @@ def get_app_dir() -> Path:
 APP_DIR = get_app_dir()
 CONFIG_PATH = APP_DIR / "config.json"
 CONFIG_SAMPLE_PATH = APP_DIR / "config.json.sample"
+APP_PY_PATH = APP_DIR / "app.py"
+APP_VERSION_PATTERN = re.compile(r'^\s*APP_VERSION\s*=\s*["\']([^"\']+)["\']', re.MULTILINE)
 PATH_KEYS = {
     ("dyna_watch_dir",),
     ("outputs_dir",),
@@ -30,6 +33,18 @@ PATH_KEYS = {
     ("ssl", "keyfile"),
 }
 MODEL_PATH_PREFIX = ("asr", "models")
+
+
+def load_app_version() -> str:
+    try:
+        text = APP_PY_PATH.read_text(encoding="utf-8")
+    except OSError:
+        return "-"
+    match = APP_VERSION_PATTERN.search(text)
+    return match.group(1) if match else "-"
+
+
+APP_VERSION = load_app_version()
 
 
 def ensure_config_file() -> None:
@@ -77,6 +92,61 @@ def normalize_path_text(value: str) -> str:
     return value.replace("\\", "/").strip()
 
 
+class ScrollableTab(ttk.Frame):
+    def __init__(self, parent, padding=0):
+        super().__init__(parent)
+        self.columnconfigure(0, weight=1)
+        self.rowconfigure(0, weight=1)
+
+        self.canvas = tk.Canvas(self, highlightthickness=0, borderwidth=0)
+        self.v_scroll = ttk.Scrollbar(self, orient="vertical", command=self.canvas.yview)
+        self.canvas.configure(yscrollcommand=self.v_scroll.set)
+
+        self.canvas.grid(row=0, column=0, sticky="nsew")
+        self.v_scroll.grid(row=0, column=1, sticky="ns")
+
+        self.content = ttk.Frame(self.canvas, padding=padding)
+        self._content_window = self.canvas.create_window((0, 0), window=self.content, anchor="nw")
+
+        self.content.bind("<Configure>", self._on_content_configure)
+        self.canvas.bind("<Configure>", self._on_canvas_configure)
+
+        for widget in (self, self.canvas, self.content):
+            widget.bind("<Enter>", self._bind_mousewheel, add="+")
+            widget.bind("<Leave>", self._unbind_mousewheel, add="+")
+
+    def _on_content_configure(self, _event=None) -> None:
+        self.canvas.configure(scrollregion=self.canvas.bbox("all"))
+
+    def _on_canvas_configure(self, event) -> None:
+        self.canvas.itemconfigure(self._content_window, width=event.width)
+
+    def _bind_mousewheel(self, _event=None) -> None:
+        self.canvas.bind_all("<MouseWheel>", self._on_mousewheel)
+        self.canvas.bind_all("<Button-4>", self._on_mousewheel_linux)
+        self.canvas.bind_all("<Button-5>", self._on_mousewheel_linux)
+
+    def _unbind_mousewheel(self, _event=None) -> None:
+        self.canvas.unbind_all("<MouseWheel>")
+        self.canvas.unbind_all("<Button-4>")
+        self.canvas.unbind_all("<Button-5>")
+
+    def _can_scroll(self) -> bool:
+        top, bottom = self.canvas.yview()
+        return (bottom - top) < 0.999
+
+    def _on_mousewheel(self, event) -> None:
+        if not self._can_scroll() or event.delta == 0:
+            return
+        self.canvas.yview_scroll(int(-event.delta / 120), "units")
+
+    def _on_mousewheel_linux(self, event) -> None:
+        if not self._can_scroll():
+            return
+        delta = -1 if event.num == 4 else 1
+        self.canvas.yview_scroll(delta, "units")
+
+
 class LauncherApp:
     def __init__(self, root: tk.Tk):
         self.root = root
@@ -107,7 +177,10 @@ class LauncherApp:
         top = ttk.Frame(outer)
         top.pack(fill="x")
 
-        ttk.Label(top, text="SpeechSummarizer", font=("", 16, "bold")).pack(side="left")
+        title_box = ttk.Frame(top)
+        title_box.pack(side="left")
+        ttk.Label(title_box, text="SpeechSummarizer", font=("", 16, "bold")).pack(side="left")
+        ttk.Label(title_box, text=f"ver {APP_VERSION}").pack(side="left", padx=(10, 0))
 
         self.status_var = tk.StringVar(value="停止中")
         ttk.Label(top, textvariable=self.status_var).pack(side="right")
@@ -141,17 +214,17 @@ class LauncherApp:
         notebook = ttk.Notebook(upper)
         notebook.pack(fill="both", expand=True)
 
-        general_tab = ttk.Frame(notebook, padding=12)
-        asr_tab = ttk.Frame(notebook, padding=12)
-        llm_tab = ttk.Frame(notebook, padding=12)
+        general_tab = ScrollableTab(notebook, padding=12)
+        asr_tab = ScrollableTab(notebook, padding=12)
+        llm_tab = ScrollableTab(notebook, padding=12)
 
         notebook.add(general_tab, text="一般")
         notebook.add(asr_tab, text="ASR")
         notebook.add(llm_tab, text="LLM")
 
-        self._build_general_tab(general_tab)
-        self._build_asr_tab(asr_tab)
-        self._build_llm_tab(llm_tab)
+        self._build_general_tab(general_tab.content)
+        self._build_asr_tab(asr_tab.content)
+        self._build_llm_tab(llm_tab.content)
         self._build_log_panel(lower)
 
     def _build_general_tab(self, parent: ttk.Frame) -> None:
