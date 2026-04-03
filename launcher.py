@@ -10,7 +10,7 @@ from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
-from version import APP_VERSION
+from app_version import APP_VERSION
 
 
 def get_app_dir() -> Path:

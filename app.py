@@ -15,7 +15,7 @@ from urllib.parse import unquote
 import re
 import shutil
 from typing import Any, Dict, List, Optional
-from version import APP_VERSION
+from app_version import APP_VERSION
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
