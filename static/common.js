@@ -42,6 +42,10 @@
   let ws = null;
   let audioCtx = null, srcNode = null, procNode = null, stream = null;
   let isRecording = false;
+  let recordingWatchdogTimer = null;
+  let lastAudioProcessAt = 0;
+  let lastAudioChunkSentAt = 0;
+  let recoveringAudio = false;
 
   let currentPatientId = '';   // 現在選択中の患者ID
   let currentSessionTxt = '';   // 現在録音中 / 選択中のセッション(.txt)名
@@ -1052,6 +1056,7 @@
       // 録音中なら状態をリセット
       if (isRecording) {
         isRecording = false;
+        stopRecordingWatchdog();
         renderRecState();
         if (selAsrModel) selAsrModel.disabled = false;
       }
@@ -1059,6 +1064,136 @@
     };
     ws.onmessage = handleWsMessage;
     log('[ws] connecting...');
+  }
+
+  async function ensureWsOpen() {
+    connectWs();
+    if (ws && ws.readyState === WebSocket.OPEN) return;
+    await new Promise((resolve, reject) => {
+      const t = setTimeout(() => reject(new Error('WS connect timeout')), 3000);
+      const prevOpen = ws?.onopen;
+      if (!ws) {
+        clearTimeout(t);
+        reject(new Error('WS unavailable'));
+        return;
+      }
+      ws.onopen = e => {
+        clearTimeout(t);
+        if (prevOpen) prevOpen(e);
+        resolve();
+      };
+    });
+  }
+
+  function startRecordingWatchdog() {
+    stopRecordingWatchdog();
+    recordingWatchdogTimer = setInterval(() => {
+      void monitorRecordingHealth();
+    }, 2000);
+  }
+
+  function stopRecordingWatchdog() {
+    if (recordingWatchdogTimer) {
+      clearInterval(recordingWatchdogTimer);
+      recordingWatchdogTimer = null;
+    }
+  }
+
+  async function cleanupAudioCapture() {
+    if (procNode) procNode.disconnect();
+    if (srcNode) srcNode.disconnect();
+    if (audioCtx) await audioCtx.close();
+    if (stream) stream.getTracks().forEach(t => t.stop());
+    procNode = srcNode = audioCtx = stream = null;
+  }
+
+  async function monitorRecordingHealth() {
+    if (!isRecording || recoveringAudio) return;
+
+    const now = Date.now();
+    if (audioCtx && audioCtx.state === 'suspended') {
+      try {
+        await audioCtx.resume();
+        log('[audio] resumed suspended audio context');
+      } catch (e) {
+        log('[audio] resume failed: ' + e);
+      }
+    }
+
+    const lastActiveAt = Math.max(lastAudioProcessAt, lastAudioChunkSentAt);
+    if (!lastActiveAt || (now - lastActiveAt) < 5000) return;
+
+    await recoverRecordingPipeline(`audio callback stalled for ${Math.round((now - lastActiveAt) / 1000)}s`);
+  }
+
+  async function createAudioPipeline() {
+    stream = await navigator.mediaDevices.getUserMedia({
+      audio: {
+        echoCancellation: false, noiseSuppression: false,
+        autoGainControl: false, channelCount: 1, sampleRate: 48000,
+      }
+    });
+    audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    srcNode = audioCtx.createMediaStreamSource(stream);
+
+    const chunkSamples = 2400;
+    let pcmBuf = new Float32Array(0);
+
+    const bufferSize = 2048;
+    procNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
+    procNode.onaudioprocess = ev => {
+      lastAudioProcessAt = Date.now();
+      if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      const input = ev.inputBuffer.getChannelData(0);
+      const merged = new Float32Array(pcmBuf.length + input.length);
+      merged.set(pcmBuf);
+      merged.set(input, pcmBuf.length);
+      pcmBuf = merged;
+      while (pcmBuf.length >= chunkSamples) {
+        ws.send(pcmBuf.slice(0, chunkSamples).buffer);
+        lastAudioChunkSentAt = Date.now();
+        pcmBuf = pcmBuf.slice(chunkSamples);
+      }
+    };
+    srcNode.connect(procNode);
+    procNode.connect(audioCtx.destination);
+
+    const [track] = stream.getAudioTracks();
+    if (track) {
+      track.onended = () => {
+        log('[audio] input track ended');
+        if (isRecording) void recoverRecordingPipeline('input track ended');
+      };
+      track.onmute = () => log('[audio] input track muted');
+      track.onunmute = () => log('[audio] input track unmuted');
+    }
+
+    lastAudioProcessAt = Date.now();
+    lastAudioChunkSentAt = Date.now();
+
+    if (audioCtx.state === 'suspended') {
+      await audioCtx.resume();
+    }
+  }
+
+  async function recoverRecordingPipeline(reason) {
+    if (!isRecording || recoveringAudio) return;
+    recoveringAudio = true;
+    try {
+      log(`[audio] recovering: ${reason}`);
+      await ensureWsOpen();
+      await cleanupAudioCapture();
+      await createAudioPipeline();
+      log('[audio] recovery complete');
+    } catch (e) {
+      log('[audio] recovery failed: ' + e);
+      isRecording = false;
+      renderRecState();
+      if (selAsrModel) selAsrModel.disabled = false;
+      stopRecordingWatchdog();
+    } finally {
+      recoveringAudio = false;
+    }
   }
 
   // ===== 録音: WS接続は使い回し、音声キャプチャのみ開始 =====
@@ -1076,46 +1211,11 @@
         log('ERROR: getUserMedia unavailable.');
         return;
       }
-      // ★ WSが切れていれば再接続（通常は既に接続済み）
-      connectWs();
-      // WS が OPEN になるまで最大3秒待つ
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
-        await new Promise((resolve, reject) => {
-          const t = setTimeout(() => reject(new Error('WS connect timeout')), 3000);
-          const prevOpen = ws.onopen;
-          ws.onopen = e => { clearTimeout(t); if (prevOpen) prevOpen(e); resolve(); };
-        });
-      }
-
-      stream = await navigator.mediaDevices.getUserMedia({
-        audio: {
-          echoCancellation: false, noiseSuppression: false,
-          autoGainControl: false, channelCount: 1, sampleRate: 48000,
-        }
-      });
-      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-      srcNode = audioCtx.createMediaStreamSource(stream);
-
-      const chunkSamples = 2400;
-      let pcmBuf = new Float32Array(0);
-
-      const bufferSize = 2048;
-      procNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
-      procNode.onaudioprocess = ev => {
-        if (!ws || ws.readyState !== WebSocket.OPEN) return;
-        const input = ev.inputBuffer.getChannelData(0);
-        const merged = new Float32Array(pcmBuf.length + input.length);
-        merged.set(pcmBuf); merged.set(input, pcmBuf.length);
-        pcmBuf = merged;
-        while (pcmBuf.length >= chunkSamples) {
-          ws.send(pcmBuf.slice(0, chunkSamples).buffer);
-          pcmBuf = pcmBuf.slice(chunkSamples);
-        }
-      };
-      srcNode.connect(procNode);
-      procNode.connect(audioCtx.destination);
+      await ensureWsOpen();
+      await createAudioPipeline();
 
       isRecording = true;
+      startRecordingWatchdog();
       renderRecState();
       if (selAsrModel) selAsrModel.disabled = true;
 
@@ -1141,11 +1241,8 @@
   async function stopRecording() {
     try {
       await flushHearingTranscriptSave();
-      if (procNode) procNode.disconnect();
-      if (srcNode) srcNode.disconnect();
-      if (audioCtx) await audioCtx.close();
-      if (stream) stream.getTracks().forEach(t => t.stop());
-      procNode = srcNode = audioCtx = stream = null;
+      stopRecordingWatchdog();
+      await cleanupAudioCapture();
       // ★ WSは閉じない（常時接続を維持してpatient_changedを受信し続ける）
 
       isRecording = false;

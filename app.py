@@ -2604,6 +2604,11 @@ async def ws_endpoint(ws: WebSocket):
                 log("[WS] state reset (patient_changed)")
 
             data = await ws.receive_bytes()
+            if st.reset_pending:
+                st.reset_pending = False
+                st.reset_audio()
+                log("[WS] state reset (patient_changed after receive)")
+                continue
             st.last_audio_rx = time.time()
             x = np.frombuffer(data, dtype=np.float32)
             if x.size == 0:
