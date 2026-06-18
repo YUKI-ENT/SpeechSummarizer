@@ -2608,7 +2608,8 @@ async def ws_endpoint(ws: WebSocket):
                 st.reset_pending = False
                 st.reset_audio()
                 log("[WS] state reset (patient_changed after receive)")
-                continue
+                # 患者切替と同時に届いた最初の音声チャンクも、新患者側で処理する。
+                # ここで捨てると、切替直後に音声受信が止まったように見えることがある。
             st.last_audio_rx = time.time()
             x = np.frombuffer(data, dtype=np.float32)
             if x.size == 0:

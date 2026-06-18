@@ -1049,16 +1049,19 @@
     ws = new WebSocket(wsUrl);
     ws.binaryType = 'arraybuffer';
 
-    ws.onopen = () => log('[ws] connected');
+    ws.onopen = () => {
+      log('[ws] connected');
+      if (isRecording) {
+        lastAudioChunkSentAt = Date.now();
+        log('[recording] connection restored; recording continues');
+      }
+    };
     ws.onerror = e => log('[ws] error ' + e);
     ws.onclose = () => {
       log('[ws] disconnected – reconnecting in 3s...');
-      // 録音中なら状態をリセット
+      // WebSocket切断は一時障害として扱い、手動OFFまでは録音状態を維持する。
       if (isRecording) {
-        isRecording = false;
-        stopRecordingWatchdog();
-        renderRecState();
-        if (selAsrModel) selAsrModel.disabled = false;
+        log('[recording] connection lost; keeping recording ON');
       }
       wsReconnectTimer = setTimeout(connectWs, 3000);
     };
@@ -1068,21 +1071,12 @@
 
   async function ensureWsOpen() {
     connectWs();
-    if (ws && ws.readyState === WebSocket.OPEN) return;
-    await new Promise((resolve, reject) => {
-      const t = setTimeout(() => reject(new Error('WS connect timeout')), 3000);
-      const prevOpen = ws?.onopen;
-      if (!ws) {
-        clearTimeout(t);
-        reject(new Error('WS unavailable'));
-        return;
-      }
-      ws.onopen = e => {
-        clearTimeout(t);
-        if (prevOpen) prevOpen(e);
-        resolve();
-      };
-    });
+    const deadline = Date.now() + 5000;
+    while (Date.now() < deadline) {
+      if (ws && ws.readyState === WebSocket.OPEN) return;
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    throw new Error('WS connect timeout');
   }
 
   function startRecordingWatchdog() {
@@ -1111,6 +1105,11 @@
     if (!isRecording || recoveringAudio) return;
 
     const now = Date.now();
+    if (!ws || ws.readyState !== WebSocket.OPEN) {
+      await recoverRecordingPipeline('WebSocket unavailable');
+      return;
+    }
+
     if (audioCtx && audioCtx.state === 'suspended') {
       try {
         await audioCtx.resume();
@@ -1182,15 +1181,16 @@
     try {
       log(`[audio] recovering: ${reason}`);
       await ensureWsOpen();
+      if (!isRecording) return;
       await cleanupAudioCapture();
+      if (!isRecording) return;
       await createAudioPipeline();
       log('[audio] recovery complete');
     } catch (e) {
       log('[audio] recovery failed: ' + e);
-      isRecording = false;
-      renderRecState();
-      if (selAsrModel) selAsrModel.disabled = false;
-      stopRecordingWatchdog();
+      if (isRecording) {
+        log('[recording] recovery will retry; recording remains ON');
+      }
     } finally {
       recoveringAudio = false;
     }
@@ -1240,14 +1240,16 @@
 
   async function stopRecording() {
     try {
-      await flushHearingTranscriptSave();
+      // これだけが録音をOFFにする経路。先に意思状態を落として復旧処理を止める。
+      isRecording = false;
       stopRecordingWatchdog();
+      renderRecState();
+      if (selAsrModel) selAsrModel.disabled = false;
+
+      await flushHearingTranscriptSave();
       await cleanupAudioCapture();
       // ★ WSは閉じない（常時接続を維持してpatient_changedを受信し続ける）
 
-      isRecording = false;
-      renderRecState();
-      if (selAsrModel) selAsrModel.disabled = false;
       try {
         const r = await fetch('/api/auto-llm/enqueue-current', { method: 'POST' });
         const j = await r.json();
