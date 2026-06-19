@@ -20,24 +20,6 @@ function Assert-Exists([string]$Path) {
   if (!(Test-Path $Path)) { throw "Not found: $Path" }
 }
 
-function Wait-UntilFileUnlocked([string]$Path, [int]$TimeoutSeconds = 30) {
-  if (!(Test-Path $Path)) { return }
-
-  $deadline = (Get-Date).AddSeconds($TimeoutSeconds)
-  while ((Get-Date) -lt $deadline) {
-    try {
-      $stream = [System.IO.File]::Open($Path, 'Open', 'Read', 'None')
-      $stream.Close()
-      return
-    }
-    catch [System.IO.IOException] {
-      Start-Sleep -Milliseconds 500
-    }
-  }
-
-  throw "Timed out waiting for file to unlock: $Path"
-}
-
 function Remove-TreeWithRetry([string]$Path, [int]$MaxAttempts = 5) {
   if (!(Test-Path $Path)) { return }
 
@@ -57,16 +39,16 @@ function Remove-TreeWithRetry([string]$Path, [int]$MaxAttempts = 5) {
 function Compress-ArchiveWithRetry(
   [string]$SourcePath,
   [string]$DestinationPath,
-  [int]$MaxAttempts = 5
+  [int]$MaxAttempts = 15
 ) {
   for ($attempt = 1; $attempt -le $MaxAttempts; $attempt++) {
     try {
       Compress-Archive -Path $SourcePath -DestinationPath $DestinationPath -Force
       return
     }
-    catch [System.IO.IOException] {
+    catch {
       if ($attempt -eq $MaxAttempts) { throw }
-      Write-Host "[zip] retry $attempt/$MaxAttempts after file lock"
+      Write-Host "[zip] retry $attempt/$MaxAttempts after error: $($_.Exception.Message)"
       if (Test-Path $DestinationPath) {
         Remove-Item $DestinationPath -Force -ErrorAction SilentlyContinue
       }
@@ -94,6 +76,8 @@ try {
     --onedir `
     --windowed `
     --name $Name `
+    --distpath $DistDir `
+    --workpath $BuildDir `
     --add-data "tools\analysis_tools\static;tools\analysis_tools\static" `
     --add-data "tools\analysis_tools\templates;tools\analysis_tools\templates" `
     --add-data "tools\correction_tool\static;tools\correction_tool\static" `
@@ -159,11 +143,9 @@ try {
   $modelTag = if ($IncludeModels) { "" } else { "-NoModels" }
   $zipName = "$Name$modelTag-win64-onedir-$stamp.zip"
   $zipPath = Join-Path $OutDir $zipName
-  $baseLibraryZip = Join-Path $internalDir "base_library.zip"
 
   if (Test-Path $zipPath) { Remove-Item $zipPath -Force }
 
-  Wait-UntilFileUnlocked -Path $baseLibraryZip
   Write-Host "[zip] create: $zipPath"
   Compress-ArchiveWithRetry -SourcePath $AppDir -DestinationPath $zipPath
 
