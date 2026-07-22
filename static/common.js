@@ -46,6 +46,7 @@
   let lastAudioProcessAt = 0;
   let lastAudioChunkSentAt = 0;
   let recoveringAudio = false;
+  let trackMuteRecoveryTimer = null;
 
   let currentPatientId = '';   // 現在選択中の患者ID
   let currentSessionTxt = '';   // 現在録音中 / 選択中のセッション(.txt)名
@@ -1007,6 +1008,12 @@
       resetLiveAsr();
       log('[patient_changed] ' + currentPatientId);
 
+      // 長時間稼働でブラウザ側の入力トラックだけが実質停止する事例への予防策。
+      // 録音の意思状態や WebSocket は維持し、音声キャプチャだけを作り直す。
+      if (isRecording) {
+        void recoverRecordingPipeline('patient changed (preventive audio refresh)');
+      }
+
       if (currentPatientId && currentSessionTxt) {
         renderOptimisticPatientSwitch(currentPatientId, currentSessionTxt, msg.patient_info);
       }
@@ -1094,10 +1101,19 @@
   }
 
   async function cleanupAudioCapture() {
+    if (trackMuteRecoveryTimer) {
+      clearTimeout(trackMuteRecoveryTimer);
+      trackMuteRecoveryTimer = null;
+    }
     if (procNode) procNode.disconnect();
     if (srcNode) srcNode.disconnect();
     if (audioCtx) await audioCtx.close();
-    if (stream) stream.getTracks().forEach(t => t.stop());
+    if (stream) stream.getTracks().forEach(t => {
+      t.onended = null;
+      t.onmute = null;
+      t.onunmute = null;
+      t.stop();
+    });
     procNode = srcNode = audioCtx = stream = null;
   }
 
@@ -1163,8 +1179,21 @@
         log('[audio] input track ended');
         if (isRecording) void recoverRecordingPipeline('input track ended');
       };
-      track.onmute = () => log('[audio] input track muted');
-      track.onunmute = () => log('[audio] input track unmuted');
+      track.onmute = () => {
+        log('[audio] input track muted');
+        clearTimeout(trackMuteRecoveryTimer);
+        trackMuteRecoveryTimer = setTimeout(() => {
+          trackMuteRecoveryTimer = null;
+          if (isRecording && track === stream?.getAudioTracks()[0] && track.muted) {
+            void recoverRecordingPipeline('input track remained muted');
+          }
+        }, 2000);
+      };
+      track.onunmute = () => {
+        log('[audio] input track unmuted');
+        clearTimeout(trackMuteRecoveryTimer);
+        trackMuteRecoveryTimer = null;
+      };
     }
 
     lastAudioProcessAt = Date.now();

@@ -2277,6 +2277,7 @@ class State:
         self.seg_index = 0
         self.last_level_sent = 0.0
         self.last_audio_rx = 0.0
+        self.last_audio_health_log = 0.0
         self.noise_floor_db: float | None = None
         self.noise_levels_db = deque(maxlen=max(1, VAD_NOISE_WINDOW_FRAMES))
         self.calibration_frames = 0
@@ -2623,6 +2624,12 @@ async def ws_endpoint(ws: WebSocket):
 
                 level = rms_dbfs(f)
                 now = time.time()
+                if now - st.last_audio_health_log >= 60.0:
+                    st.last_audio_health_log = now
+                    log(
+                        f"[AUDIO_RX] alive dbfs={level:.2f} "
+                        f"threshold={st.current_threshold_db():.2f} in_speech={st.in_speech}"
+                    )
                 if now - st.last_level_sent >= 0.5:
                     st.last_level_sent = now
                     await ws.send_json({
