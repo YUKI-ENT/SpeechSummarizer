@@ -41,7 +41,21 @@
 
   "asr": {
     "enabled": true,
+    "provider": "whisper",
     "model_id": "small",
+
+    "qwen": {
+      "base_url": "http://127.0.0.1:8010",
+      "timeout_sec": 35,
+      "language": "Japanese",
+      "context": "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。",
+      "model": "1.7b",
+      "managed_by_launcher": true,
+      "python_executable": "../QwenASR/.venv/Scripts/python.exe",
+      "server_script": "../QwenASR/server.py",
+      "config_path": "../QwenASR/config.json",
+      "startup_timeout_sec": 90
+    },
 
     "models": {
       "small": "models/small",

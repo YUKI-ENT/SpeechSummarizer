@@ -5,12 +5,14 @@ import shutil
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from app_version import APP_VERSION
+from launcher_helpers import qwen_api_is_ready, resolve_launcher_path
 
 
 def get_app_dir() -> Path:
@@ -31,6 +33,15 @@ PATH_KEYS = {
     ("ssl", "keyfile"),
 }
 MODEL_PATH_PREFIX = ("asr", "models")
+FIELD_DEFAULTS = {
+    "asr_provider": "whisper",
+    "qwen_base_url": "http://127.0.0.1:8010",
+    "qwen_managed": True,
+    "qwen_python": "../QwenASR/.venv/Scripts/python.exe",
+    "qwen_server": "../QwenASR/server.py",
+    "qwen_config": "../QwenASR/config.json",
+    "qwen_startup_timeout": 90,
+}
 
 
 def ensure_config_file() -> None:
@@ -141,12 +152,16 @@ class LauncherApp:
         self.root.minsize(980, 780)
 
         self.proc: subprocess.Popen | None = None
+        self.qwen_proc: subprocess.Popen | None = None
+        self._starting = False
         self.log_queue: queue.Queue[str] = queue.Queue()
+        self.action_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
         self.vars: dict[str, tk.Variable] = {}
         self.field_meta: dict[str, dict] = {}
         self.model_rows: list[tuple[tk.StringVar, tk.StringVar]] = []
         self.prompt_rows: list[tuple[tk.StringVar, tk.StringVar, ScrolledText]] = []
         self._auto_start_attempted = False
+        self._cancel_start = threading.Event()
 
         self.cfg = load_config()
         self._build_ui()
@@ -248,6 +263,11 @@ class LauncherApp:
             parent.columnconfigure(i, weight=1)
 
         row = 0
+        self._add_choice(
+            parent, "asr_provider", "ASR Provider", ("asr", "provider"),
+            ["whisper", "qwen3-asr"], row=row,
+        )
+        row += 1
         self._add_entry(parent, "asr_model_id", "選択モデルID", ("asr", "model_id"), kind="str", row=row, width=20)
         self._add_entry(parent, "asr_language", "言語", ("asr", "language"), kind="str", row=row, col=2, width=12)
         row += 1
@@ -260,6 +280,39 @@ class LauncherApp:
         self._add_bool(parent, "asr_condition_prev", "前文脈を利用", ("asr", "condition_on_previous_text"), row=row)
         row += 1
         self._add_text(parent, "asr_initial_prompt", "Initial Prompt", ("asr", "initial_prompt"), row=row, height=5)
+        row += 1
+
+        qwen_box = ttk.LabelFrame(parent, text="Qwen3-ASR API", padding=10)
+        qwen_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        for i in range(3):
+            qwen_box.columnconfigure(i, weight=1)
+        qwen_row = 0
+        self._add_entry(qwen_box, "qwen_base_url", "API URL", ("asr", "qwen", "base_url"), kind="str", row=qwen_row, width=36)
+        qwen_row += 1
+        self._add_bool(
+            qwen_box, "qwen_managed", "Windows GUIランチャーでQwenASRを起動・停止",
+            ("asr", "qwen", "managed_by_launcher"), row=qwen_row,
+        )
+        qwen_row += 1
+        self._add_path_entry(
+            qwen_box, "qwen_python", "Qwen Python", ("asr", "qwen", "python_executable"),
+            row=qwen_row, select="file",
+        )
+        qwen_row += 1
+        self._add_path_entry(
+            qwen_box, "qwen_server", "Qwen server.py", ("asr", "qwen", "server_script"),
+            row=qwen_row, select="file",
+        )
+        qwen_row += 1
+        self._add_path_entry(
+            qwen_box, "qwen_config", "Qwen config.json", ("asr", "qwen", "config_path"),
+            row=qwen_row, select="file",
+        )
+        qwen_row += 1
+        self._add_entry(
+            qwen_box, "qwen_startup_timeout", "起動待機秒", ("asr", "qwen", "startup_timeout_sec"),
+            kind="float", row=qwen_row, width=12,
+        )
         row += 1
 
         vad_box = ttk.LabelFrame(parent, text="VAD", padding=10)
@@ -474,7 +527,8 @@ class LauncherApp:
                 key = path[2]
                 value = base.get(key, False if kind == "bool" else "")
             else:
-                value = get_nested(self.cfg, path, False if kind == "bool" else "")
+                fallback = FIELD_DEFAULTS.get(name, False if kind == "bool" else "")
+                value = get_nested(self.cfg, path, fallback)
 
             widget = self.vars[name]
             if kind == "bool":
@@ -595,12 +649,11 @@ class LauncherApp:
             messagebox.showerror("設定保存エラー", str(e), parent=self.root)
             return False
 
-    def start_server(self) -> None:
-        if self.proc and self.proc.poll() is None:
+    def _start_speechsummarizer_process(self) -> None:
+        if self._cancel_start.is_set():
+            self._starting = False
+            self._update_status()
             return
-        if not self.save_form():
-            return
-
         cmd = [sys.executable, "--server"] if getattr(sys, "frozen", False) else [sys.executable, str(Path(__file__).resolve()), "--server"]
         try:
             popen_encoding = locale.getpreferredencoding(False) or "utf-8"
@@ -617,10 +670,95 @@ class LauncherApp:
         except Exception as e:
             messagebox.showerror("起動エラー", str(e), parent=self.root)
             self.proc = None
+            self._stop_owned_qwen()
+            self._starting = False
+            self._update_status()
             return
 
-        threading.Thread(target=self._read_process_output, daemon=True).start()
+        threading.Thread(
+            target=self._read_process_output, args=(self.proc, "server"), daemon=True
+        ).start()
         self._append_log(f"[launcher] server start: {' '.join(cmd)}")
+        self._starting = False
+        self._update_status()
+
+    def start_server(self) -> None:
+        if self._starting or (self.proc and self.proc.poll() is None):
+            return
+        if not self.save_form():
+            return
+
+        self._cancel_start.clear()
+        provider = str(get_nested(self.cfg, ("asr", "provider"), "whisper")).strip().lower()
+        managed = bool(get_nested(self.cfg, ("asr", "qwen", "managed_by_launcher"), False))
+        if provider not in {"qwen", "qwen3-asr"} or not managed:
+            self._start_speechsummarizer_process()
+            return
+
+        self._starting = True
+        self._update_status()
+        threading.Thread(target=self._start_managed_qwen_then_server, daemon=True).start()
+
+    def _start_managed_qwen_then_server(self) -> None:
+        qwen_cfg = get_nested(self.cfg, ("asr", "qwen"), {}) or {}
+        base_url = str(qwen_cfg.get("base_url", "http://127.0.0.1:8010")).rstrip("/")
+        if qwen_api_is_ready(base_url):
+            self.log_queue.put("[launcher] QwenASR is already ready; using external process")
+            self.action_queue.put(("start_speechsummarizer", None))
+            return
+
+        try:
+            python_path = resolve_launcher_path(str(qwen_cfg.get("python_executable", "")), APP_DIR)
+            server_path = resolve_launcher_path(str(qwen_cfg.get("server_script", "")), APP_DIR)
+            config_path = resolve_launcher_path(str(qwen_cfg.get("config_path", "")), APP_DIR)
+            timeout_sec = float(qwen_cfg.get("startup_timeout_sec", 90.0))
+            if timeout_sec <= 0:
+                raise ValueError("Qwen startup_timeout_sec must be greater than zero")
+            for label, path in (
+                ("Qwen Python", python_path),
+                ("Qwen server.py", server_path),
+                ("Qwen config.json", config_path),
+            ):
+                if not path.is_file():
+                    raise FileNotFoundError(f"{label} not found: {path}")
+
+            cmd = [str(python_path), str(server_path), "--config", str(config_path)]
+            popen_encoding = locale.getpreferredencoding(False) or "utf-8"
+            self.qwen_proc = subprocess.Popen(
+                cmd,
+                cwd=str(server_path.parent),
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                text=True,
+                encoding=popen_encoding,
+                errors="replace",
+                bufsize=1,
+            )
+            threading.Thread(
+                target=self._read_process_output, args=(self.qwen_proc, "qwen"), daemon=True
+            ).start()
+            self.log_queue.put(f"[launcher] QwenASR start: {' '.join(cmd)}")
+
+            deadline = time.monotonic() + timeout_sec
+            while time.monotonic() < deadline and not self._cancel_start.is_set():
+                if self.qwen_proc.poll() is not None:
+                    raise RuntimeError(f"QwenASR exited before ready (rc={self.qwen_proc.returncode})")
+                if qwen_api_is_ready(base_url):
+                    self.log_queue.put("[launcher] QwenASR ready")
+                    self.action_queue.put(("start_speechsummarizer", None))
+                    return
+                self._cancel_start.wait(0.25)
+            if self._cancel_start.is_set():
+                return
+            raise TimeoutError(f"QwenASR did not become ready within {timeout_sec:g} seconds")
+        except Exception as exc:
+            self.action_queue.put(("managed_start_failed", str(exc)))
+
+    def _managed_start_failed(self, error: str) -> None:
+        self._stop_owned_qwen()
+        self._starting = False
+        self._append_log(f"[launcher] QwenASR start failed: {error}")
+        messagebox.showerror("QwenASR起動エラー", error, parent=self.root)
         self._update_status()
 
     def _maybe_auto_start_server(self) -> None:
@@ -637,17 +775,32 @@ class LauncherApp:
         self._append_log("[launcher] auto start enabled: starting server")
         self.start_server()
 
-    def stop_server(self) -> None:
-        if not self.proc or self.proc.poll() is not None:
+    @staticmethod
+    def _terminate_process(proc: subprocess.Popen | None) -> None:
+        if proc is None or proc.poll() is not None:
             return
         try:
-            self.proc.terminate()
-            self.proc.wait(timeout=5)
+            proc.terminate()
+            proc.wait(timeout=5)
         except Exception:
             try:
-                self.proc.kill()
+                proc.kill()
             except Exception:
                 pass
+
+    def _stop_owned_qwen(self) -> None:
+        if self.qwen_proc is None:
+            return
+        self._terminate_process(self.qwen_proc)
+        self.qwen_proc = None
+        self._append_log("[launcher] managed QwenASR stopped")
+
+    def stop_server(self) -> None:
+        self._cancel_start.set()
+        self._terminate_process(self.proc)
+        self.proc = None
+        self._stop_owned_qwen()
+        self._starting = False
         self._append_log("[launcher] server stopped")
         self._update_status()
 
@@ -658,16 +811,24 @@ class LauncherApp:
         scheme = "https" if ssl_enabled else "http"
         webbrowser.open(f"{scheme}://127.0.0.1:{port}")
 
-    def _read_process_output(self) -> None:
-        assert self.proc is not None
-        if not self.proc.stdout:
+    def _read_process_output(self, proc: subprocess.Popen, label: str) -> None:
+        if not proc.stdout:
             return
-        for line in self.proc.stdout:
-            self.log_queue.put(line.rstrip())
-        rc = self.proc.poll()
-        self.log_queue.put(f"[launcher] server exited rc={rc}")
+        for line in proc.stdout:
+            self.log_queue.put(f"[{label}] {line.rstrip()}")
+        rc = proc.poll()
+        self.log_queue.put(f"[launcher] {label} exited rc={rc}")
 
     def _poll_log_queue(self) -> None:
+        try:
+            while True:
+                action, value = self.action_queue.get_nowait()
+                if action == "start_speechsummarizer":
+                    self._start_speechsummarizer_process()
+                elif action == "managed_start_failed":
+                    self._managed_start_failed(value or "QwenASR start failed")
+        except queue.Empty:
+            pass
         try:
             while True:
                 line = self.log_queue.get_nowait()
@@ -685,13 +846,20 @@ class LauncherApp:
 
     def _update_status(self) -> None:
         running = self.proc is not None and self.proc.poll() is None
-        self.status_var.set("起動中" if running else "停止中")
-        self.status_indicator.itemconfigure(self.status_indicator_oval, fill="#16a34a" if running else "#9ca3af")
-        self.btn_start.configure(state="disabled" if running else "normal")
-        self.btn_stop.configure(state="normal" if running else "disabled")
+        self.status_var.set("起動準備中" if self._starting else ("起動中" if running else "停止中"))
+        color = "#eab308" if self._starting else ("#16a34a" if running else "#9ca3af")
+        self.status_indicator.itemconfigure(self.status_indicator_oval, fill=color)
+        self.btn_start.configure(state="disabled" if running or self._starting else "normal")
+        managed_running = self.qwen_proc is not None and self.qwen_proc.poll() is None
+        self.btn_stop.configure(state="normal" if running or managed_running or self._starting else "disabled")
 
     def _on_close(self) -> None:
-        if self.proc and self.proc.poll() is None:
+        any_running = (
+            self._starting
+            or (self.proc is not None and self.proc.poll() is None)
+            or (self.qwen_proc is not None and self.qwen_proc.poll() is None)
+        )
+        if any_running:
             if not messagebox.askyesno("終了確認", "サーバーを停止して終了しますか？", parent=self.root):
                 return
             self.stop_server()

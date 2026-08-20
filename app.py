@@ -16,6 +16,7 @@ import re
 import shutil
 from typing import Any, Dict, List, Optional
 from app_version import APP_VERSION
+from asr_providers import create_asr_provider
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
@@ -903,6 +904,11 @@ async def _run_auto_llm_job(job: dict):
 # -------------------------
 ASR_CFG = CFG.get("asr", {}) or {}
 ASR_ENABLED = bool(ASR_CFG.get("enabled", True))
+ASR_PROVIDER_NAME = str(ASR_CFG.get("provider", "whisper")).strip().lower() or "whisper"
+if ASR_PROVIDER_NAME == "qwen":
+    ASR_PROVIDER_NAME = "qwen3-asr"
+if ASR_PROVIDER_NAME not in {"whisper", "qwen3-asr"}:
+    raise ValueError(f"unsupported asr.provider: {ASR_PROVIDER_NAME}")
 
 ASR_LANG = ASR_CFG.get("language", "ja")
 ASR_DEVICE = ASR_CFG.get("device", "cpu")
@@ -951,6 +957,10 @@ CURRENT["asr"]["model_path"] = ASR_MODEL
 CURRENT["asr"]["language"] = ASR_LANG
 CURRENT["asr"]["temperature"] = ASR_TEMP
 CURRENT["asr"]["prompt"] = ASR_PROMPT_DEFAULT
+CURRENT["asr"]["provider"] = ASR_PROVIDER_NAME
+if ASR_PROVIDER_NAME == "qwen3-asr":
+    CURRENT["asr"]["model_name"] = str((ASR_CFG.get("qwen") or {}).get("model", "qwen3-asr"))
+    CURRENT["asr"]["model_path"] = None
 
 def get_asr_runtime_config() -> dict:
     a = CURRENT.get("asr") or {}
@@ -960,10 +970,13 @@ def get_asr_runtime_config() -> dict:
     temp = float(a.get("temperature") if a.get("temperature") is not None else ASR_TEMP)
     prompt = a.get("prompt") if a.get("prompt") is not None else ASR_PROMPT_DEFAULT
 
+    qwen_cfg = ASR_CFG.get("qwen") or {}
     return {
+        "provider": ASR_PROVIDER_NAME,
         "model_name": model_name,
-        "model_path": model_path,
-        "language": lang,
+        "model_path": model_path if ASR_PROVIDER_NAME == "whisper" else None,
+        "language": (qwen_cfg.get("language") or "Japanese") if ASR_PROVIDER_NAME == "qwen3-asr" else lang,
+        "context": (qwen_cfg.get("context") if qwen_cfg.get("context") is not None else prompt),
         "temperature": temp,
         "prompt": prompt,
         "beam_size": ASR_BEAM,
@@ -1116,11 +1129,22 @@ def clear_model_cache_for(model_path: str | None):
     key = (model_path, ASR_DEVICE, ASR_COMPUTE)
     _MODEL_CACHE.pop(key, None)
 
+_ASR_PROVIDER = None
+
+def get_asr_provider():
+    global _ASR_PROVIDER
+    if _ASR_PROVIDER is None:
+        _ASR_PROVIDER = create_asr_provider(ASR_CFG, get_model_for)
+    return _ASR_PROVIDER
+
 def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
     """
     ★ config.json の asr.models のキーを受け取り、モデルを切り替える
     """
     global MODELS_REGISTRY, ASR_MODEL_ID, ASR_MODEL
+
+    if ASR_PROVIDER_NAME != "whisper":
+        return (False, "model switching is available only for the whisper provider")
 
     MODELS_REGISTRY = load_models_registry()
     if model_id not in MODELS_REGISTRY:
@@ -1863,6 +1887,15 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
 # -------------------------
 @app.get("/api/asr/models")
 async def api_asr_models():
+    if ASR_PROVIDER_NAME != "whisper":
+        qwen_cfg = ASR_CFG.get("qwen") or {}
+        model_name = str(qwen_cfg.get("model", "qwen3-asr"))
+        return {
+            "provider": ASR_PROVIDER_NAME,
+            "current": model_name,
+            "models": [{"id": model_name, "label": model_name}],
+            "switchable": False,
+        }
     reg = load_models_registry()
     cur = CURRENT.get("asr", {}).get("model_name") or ASR_MODEL_ID
 
@@ -1874,8 +1907,10 @@ async def api_asr_models():
                 break
 
     return {
+        "provider": ASR_PROVIDER_NAME,
         "current": cur,
         "models": [{"id": k, "label": k} for k in sorted(reg.keys())],
+        "switchable": True,
     }
 
 @app.post("/api/asr/model")
@@ -2462,45 +2497,25 @@ async def asr_worker(ws: WebSocket, st: State):
             audio_meta = job.get("audio_meta", {})
 
             cfg_rt = get_asr_runtime_config()
-            model_path = cfg_rt["model_path"]
-
-            log(f"[ASR] dequeued seg#{seg_id} wav={wav} model={cfg_rt.get('model_name')}")
+            log(
+                f"[ASR] dequeued seg#{seg_id} provider={cfg_rt.get('provider')} "
+                f"model={cfg_rt.get('model_name')}"
+            )
 
             try:
-                model = get_model_for(model_path)
+                provider = get_asr_provider()
             except Exception as e:
-                log(f"[ASR] model load FAILED: {e}")
-                await ws.send_json({"type": "error", "where": "asr_model_load", "error": str(e), "model_path": model_path})
+                log(f"[ASR] provider initialization FAILED: {e}")
+                await ws.send_json({"type": "error", "where": "asr_provider_init", "error": str(e)})
                 continue
 
             t0 = time.time()
             log(f"[ASR] transcribe start seg#{seg_id:03d} dur={dur}s")
 
-            segments, _info = model.transcribe(
-                wav,
-                language=cfg_rt["language"],
-                vad_filter=False,
-                beam_size=cfg_rt["beam_size"],
-                temperature=cfg_rt["temperature"],
-                condition_on_previous_text=cfg_rt["condition_on_previous_text"],
-                initial_prompt=cfg_rt["prompt"],
-            )
+            result = await provider.transcribe(wav, cfg_rt)
 
-            texts = []
-            avg_logprob_list = []
-            no_speech_list = []
-            comp_ratio_list = []
-
-            for s in segments:
-                t = (getattr(s, "text", "") or "").strip()
-                if t:
-                    texts.append(t)
-                avg_logprob_list.append(getattr(s, "avg_logprob", None))
-                no_speech_list.append(getattr(s, "no_speech_prob", None))
-                comp_ratio_list.append(getattr(s, "compression_ratio", None))
-
-            # UI / .txt 用：セグメントごとに改行
-            text_ui = "\n".join(texts).strip()
+            # UI / .txt 用：Whisperはセグメントごとの改行を維持する。
+            text_ui = result.text
 
             # 品質判定は「改行無し」のほうが安定するなら、ここで潰した版を使う
             text_for_judge = text_ui.replace("\r", " ").replace("\n", " ").strip()
@@ -2509,10 +2524,21 @@ async def asr_worker(ws: WebSocket, st: State):
 
             asr_meta = {
                 "asr_sec": round(dt, 2),
-                "avg_logprob": round_or_none(safe_avg(avg_logprob_list), 3),
-                "no_speech_prob": round_or_none(safe_avg(no_speech_list), 3),
-                "compression_ratio": round_or_none(safe_avg(comp_ratio_list), 3),
+                "provider": result.provider,
+                "engine": result.engine,
+                "model": result.model,
+                "language": result.language,
+                "provider_metrics": result.provider_metrics,
             }
+            if result.timing:
+                asr_meta["timing"] = result.timing
+            if result.request_id:
+                asr_meta["request_id"] = result.request_id
+            # 後方互換: Whisperが実際に返した指標だけを従来キーにも保存する。
+            if result.provider == "whisper":
+                for metric_name in ("avg_logprob", "no_speech_prob", "compression_ratio"):
+                    if metric_name in result.provider_metrics:
+                        asr_meta[metric_name] = result.provider_metrics[metric_name]
 
             quality, reasons = judge_quality(audio_meta, asr_meta, text_for_judge)
 
@@ -2535,8 +2561,9 @@ async def asr_worker(ws: WebSocket, st: State):
                 "wav": wav,
                 "text": text_ui,
                 "asr_cfg": {
-                    "model_name": cfg_rt.get("model_name"),
-                    "model_path": cfg_rt.get("model_path"),
+                    "provider": result.provider,
+                    "model_name": result.model or cfg_rt.get("model_name"),
+                    "model_path": cfg_rt.get("model_path") if result.provider == "whisper" else None,
                     "language": cfg_rt.get("language"),
                     "temperature": cfg_rt.get("temperature"),
                     "prompt": cfg_rt.get("prompt"),
@@ -2548,9 +2575,10 @@ async def asr_worker(ws: WebSocket, st: State):
 
             log(
                 f"[ASR] done seg#{seg_id:03d} sec={dt:.2f} "
+                f"provider={result.provider} "
                 f"q={quality} reasons={reasons} "
                 f"rms={audio_meta.get('rms_dbfs')} no_speech={asr_meta.get('no_speech_prob')} "
-                f"comp={asr_meta.get('compression_ratio')} text_head={text_for_judge[:60]!r}"
+                f"comp={asr_meta.get('compression_ratio')}"
             )
 
             # WebSocket へは改行入り表示を送る
@@ -2562,8 +2590,9 @@ async def asr_worker(ws: WebSocket, st: State):
                 "wav": wav,
                 "text": text_ui,
                 "asr_cfg": {
-                    "model_name": cfg_rt.get("model_name"),
-                    "model_path": cfg_rt.get("model_path"),
+                    "provider": result.provider,
+                    "model_name": result.model or cfg_rt.get("model_name"),
+                    "model_path": cfg_rt.get("model_path") if result.provider == "whisper" else None,
                     "language": cfg_rt.get("language"),
                     "temperature": cfg_rt.get("temperature"),
                     "prompt": cfg_rt.get("prompt"),

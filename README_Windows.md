@@ -24,6 +24,18 @@ PyInstallerのOneFolder形式でビルドし、配布用ZIPを作成するスク
 Windows用EXEはWindows上でビルドしてください。LinuxやWSL上からこのスクリプトを
 実行しても、通常のWindows用EXEは作成できません。
 
+## Qwen3-ASRをGUIランチャーから利用する
+
+QwenASRはSpeechSummarizerとは別のPython仮想環境に配置します。GUIランチャーのASRタブでproviderを`qwen3-asr`にし、「Windows GUIランチャーでQwenASRを起動・停止」を有効にして、次の3ファイルを指定してください。
+
+- QwenASRの`.venv\Scripts\python.exe`
+- QwenASRの`server.py`
+- QwenASRの`config.json`
+
+「サーバー起動」を押すと、ランチャーはQwenASRを起動して`/ready`を待ち、その後にSpeechSummarizer本体を起動します。「サーバー停止」またはランチャー終了時には、ランチャー自身が起動したQwenASRも停止します。すでに手動起動されたQwenASRがreadyの場合はそのプロセスを利用し、ランチャーから停止しません。
+
+PythonからSpeechSummarizerの`app.py`を直接実行した場合、この自動管理は動作しません。その場合は従来どおりQwenASRを別途起動し、`config.json`でproviderとAPI URLを指定します。
+
 ## 初回のみ行う準備
 
 PowerShellでリポジトリのルートに移動します。

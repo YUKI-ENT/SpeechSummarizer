@@ -165,6 +165,41 @@ pip install -r requirements.txt
       └─ tokenizer.json
   ```
 
+## ASR providerの切り替え
+
+既定の `faster-whisper` はそのまま利用できます。別プロセスで稼働するQwen3-ASR HTTP APIを使う場合は、`config.json` の `asr.provider` を変更してSpeechSummarizerを再起動します。VADとWAV分割はどちらのproviderでもSpeechSummarizer側の同じ処理を使います。
+
+Whisperを使う設定:
+
+```json
+"asr": {
+  "provider": "whisper"
+}
+```
+
+localhostのQwen3-ASR APIを使う設定:
+
+```json
+"asr": {
+  "provider": "qwen3-asr",
+  "qwen": {
+    "base_url": "http://127.0.0.1:8010",
+    "timeout_sec": 35,
+    "language": "Japanese",
+    "context": "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。",
+    "model": "1.7b"
+  }
+}
+```
+
+起動前に `curl http://127.0.0.1:8010/ready` でQwen3-ASR側が `status: ready` を返すことを確認してください。Qwen側のモデルはAPIサーバー起動時に固定されるため、SpeechSummarizerの画面からは切り替えできません。
+
+Windows GUIランチャーから利用する場合は、ASRタブでproviderを`qwen3-asr`にし、「Windows GUIランチャーでQwenASRを起動・停止」を有効にできます。QwenASR側のPython、`server.py`、`config.json`を指定すると、ランチャーはQwenASRを先に起動し、`/ready`を確認してからSpeechSummarizer本体を起動します。ランチャーが起動したQwenASRは、サーバー停止時とランチャー終了時に一緒に停止します。すでに同じURLでQwenASRがreadyの場合は外部プロセスとして利用し、ランチャーからは停止しません。
+
+Pythonから`app.py`を直接起動する場合、ランチャーによるプロセス管理は行われません。従来どおり`config.json`のproviderとAPI URLを使い、QwenASRは別途起動してください。
+
+JSONLにはprovider名、engine、実測timing、providerが実際に返したmetricsだけを保存します。`avg_logprob`、`no_speech_prob`、`compression_ratio` はWhisper結果にだけ含まれ、Qwen用の代替値は生成しません。Qwen使用時の品質判定は既存の音声メタデータとテキスト検査だけで行います。
+
 ## 起動方法
 ### Windows Exe版
 - SpeechSummarizer.exeをクリックし、起動に成功すると下記のような表示になります

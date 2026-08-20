@@ -292,6 +292,8 @@
         selAsrModel.appendChild(o);
       });
       if (j.current) selAsrModel.value = j.current;
+      selAsrModel.dataset.switchable = (j.switchable === false) ? 'false' : 'true';
+      selAsrModel.disabled = isRecording || j.switchable === false;
     } catch (e) { log(`[ui] loadAsrModels failed: ${e}`); }
   }
 
@@ -1273,7 +1275,7 @@
       isRecording = false;
       stopRecordingWatchdog();
       renderRecState();
-      if (selAsrModel) selAsrModel.disabled = false;
+      if (selAsrModel) selAsrModel.disabled = selAsrModel.dataset.switchable === 'false';
 
       await flushHearingTranscriptSave();
       await cleanupAudioCapture();
