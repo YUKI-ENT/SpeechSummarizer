@@ -49,7 +49,6 @@
       "timeout_sec": 35,
       "language": "Japanese",
       "context": "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。",
-      "model": "1.7b",
       "managed_by_launcher": true,
       "python_executable": "../QwenASR/.venv/Scripts/python.exe",
       "server_script": "../QwenASR/server.py",

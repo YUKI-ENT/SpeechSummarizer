@@ -16,7 +16,7 @@ import re
 import shutil
 from typing import Any, Dict, List, Optional
 from app_version import APP_VERSION
-from asr_providers import create_asr_provider
+from asr_providers import asr_model_label, create_asr_provider
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
@@ -959,8 +959,9 @@ CURRENT["asr"]["temperature"] = ASR_TEMP
 CURRENT["asr"]["prompt"] = ASR_PROMPT_DEFAULT
 CURRENT["asr"]["provider"] = ASR_PROVIDER_NAME
 if ASR_PROVIDER_NAME == "qwen3-asr":
-    CURRENT["asr"]["model_name"] = str((ASR_CFG.get("qwen") or {}).get("model", "qwen3-asr"))
+    CURRENT["asr"]["model_name"] = None
     CURRENT["asr"]["model_path"] = None
+    CURRENT["asr"]["model_id"] = None
 
 def get_asr_runtime_config() -> dict:
     a = CURRENT.get("asr") or {}
@@ -1136,6 +1137,28 @@ def get_asr_provider():
     if _ASR_PROVIDER is None:
         _ASR_PROVIDER = create_asr_provider(ASR_CFG, get_model_for)
     return _ASR_PROVIDER
+
+def set_current_qwen_model(model_name: str, model_id: str | None = None) -> None:
+    normalized_name = str(model_name or "").strip()
+    normalized_id = str(model_id or "").strip()
+    if normalized_name:
+        CURRENT["asr"]["model_name"] = normalized_name
+        correction_tool_app.state.asr_models = [normalized_name]
+    if normalized_id:
+        CURRENT["asr"]["model_id"] = normalized_id
+
+async def refresh_qwen_model_info() -> dict | None:
+    if ASR_PROVIDER_NAME != "qwen3-asr":
+        return None
+    try:
+        info = await get_asr_provider().ready()
+    except Exception as exc:
+        log(f"[ASR] Qwen /ready failed: {exc}")
+        return None
+    model_name = str(info.get("model") or "").strip()
+    model_id = str(info.get("model_id") or "").strip()
+    set_current_qwen_model(model_name, model_id)
+    return info
 
 def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
     """
@@ -1404,7 +1427,9 @@ correction_tool_app.state.default_prompt_id = (
     LLM_CFG.get("correction_tool_default_prompt_id")
     or (_correction_prompt_items[0]["id"] if _correction_prompt_items else "correction_v1")
 )
-correction_tool_app.state.asr_models = list((MODELS_REGISTRY or {}).keys())
+correction_tool_app.state.asr_models = (
+    [] if ASR_PROVIDER_NAME == "qwen3-asr" else list((MODELS_REGISTRY or {}).keys())
+)
 app.mount("/analysis-tools", analysis_tools_app)
 app.mount("/so-labeler", so_labeler_app)
 
@@ -1631,6 +1656,7 @@ async def api_version():
 @app.on_event("startup")
 async def _startup():
     load_patient_data()
+    await refresh_qwen_model_info()
     asyncio.create_task(dyna_watch_task())
 
     # Auto LLM worker（逐次キュー処理）
@@ -1888,13 +1914,16 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
 @app.get("/api/asr/models")
 async def api_asr_models():
     if ASR_PROVIDER_NAME != "whisper":
-        qwen_cfg = ASR_CFG.get("qwen") or {}
-        model_name = str(qwen_cfg.get("model", "qwen3-asr"))
+        ready_info = await refresh_qwen_model_info()
+        model_name = str(CURRENT.get("asr", {}).get("model_name") or "qwen3-asr")
+        display_name = model_name if ready_info is not None else "未接続"
         return {
             "provider": ASR_PROVIDER_NAME,
             "current": model_name,
-            "models": [{"id": model_name, "label": model_name}],
+            "models": [{"id": model_name, "label": asr_model_label(ASR_PROVIDER_NAME, display_name)}],
             "switchable": False,
+            "model_id": (ready_info or {}).get("model_id"),
+            "ready": ready_info is not None,
         }
     reg = load_models_registry()
     cur = CURRENT.get("asr", {}).get("model_name") or ASR_MODEL_ID
@@ -1909,7 +1938,10 @@ async def api_asr_models():
     return {
         "provider": ASR_PROVIDER_NAME,
         "current": cur,
-        "models": [{"id": k, "label": k} for k in sorted(reg.keys())],
+        "models": [
+            {"id": k, "label": asr_model_label(ASR_PROVIDER_NAME, k)}
+            for k in sorted(reg.keys())
+        ],
         "switchable": True,
     }
 
@@ -2513,6 +2545,9 @@ async def asr_worker(ws: WebSocket, st: State):
             log(f"[ASR] transcribe start seg#{seg_id:03d} dur={dur}s")
 
             result = await provider.transcribe(wav, cfg_rt)
+
+            if result.provider == "qwen3-asr" and result.model:
+                set_current_qwen_model(result.model)
 
             # UI / .txt 用：Whisperはセグメントごとの改行を維持する。
             text_ui = result.text

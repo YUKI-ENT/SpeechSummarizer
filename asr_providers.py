@@ -112,7 +112,7 @@ class Qwen3ASRProvider:
 
     async def ready(self) -> dict[str, Any]:
         try:
-            response = await self._request("GET", "/ready")
+            response = await self._request("GET", "/ready", timeout=min(self.timeout_sec, 2.0))
         except httpx.HTTPError as exc:
             raise ASRProviderError("Qwen3-ASR APIへ接続できません。", code="not_ready", retryable=True) from exc
         payload = self._decode_payload(response)
@@ -207,3 +207,10 @@ def create_asr_provider(config: dict[str, Any], model_loader: Callable[[str], An
             raise ValueError("asr.qwen.timeout_sec must be greater than zero")
         return Qwen3ASRProvider(base_url, timeout_sec=timeout_sec)
     raise ValueError(f"unsupported asr.provider: {provider_name}")
+
+
+def asr_model_label(provider_name: str, model_name: str) -> str:
+    """Build a provider-neutral model label for display in the client."""
+    provider = str(provider_name or "asr").strip().lower() or "asr"
+    model = str(model_name or "").strip()
+    return f"{provider}:{model}"

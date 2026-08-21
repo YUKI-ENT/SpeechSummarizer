@@ -9,6 +9,7 @@ from asr_providers import (
     ASRProviderError,
     Qwen3ASRProvider,
     WhisperASRProvider,
+    asr_model_label,
     create_asr_provider,
 )
 
@@ -131,6 +132,10 @@ class QwenProviderTests(unittest.IsolatedAsyncioTestCase):
                 {"provider": "qwen3-asr", "qwen": {"base_url": "http://example.com:8010"}},
                 lambda _path: None,
             )
+
+    def test_provider_model_display_label(self):
+        self.assertEqual(asr_model_label("qwen3-asr", "1.7b"), "qwen3-asr:1.7b")
+        self.assertEqual(asr_model_label("whisper", "large-v3"), "whisper:large-v3")
 
 
 if __name__ == "__main__":
