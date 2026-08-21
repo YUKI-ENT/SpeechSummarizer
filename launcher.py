@@ -12,7 +12,12 @@ import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
 from app_version import APP_VERSION
-from launcher_helpers import qwen_api_is_ready, resolve_launcher_path
+from launcher_helpers import (
+    QwenReadyStatus,
+    fetch_qwen_ready_status,
+    qwen_api_is_ready,
+    resolve_launcher_path,
+)
 
 
 def get_app_dir() -> Path:
@@ -36,6 +41,9 @@ MODEL_PATH_PREFIX = ("asr", "models")
 FIELD_DEFAULTS = {
     "asr_provider": "whisper",
     "qwen_base_url": "http://127.0.0.1:8010",
+    "qwen_timeout": 35,
+    "qwen_language": "Japanese",
+    "qwen_context": "",
     "qwen_managed": True,
     "qwen_python": "../QwenASR/.venv/Scripts/python.exe",
     "qwen_server": "../QwenASR/server.py",
@@ -155,19 +163,23 @@ class LauncherApp:
         self.qwen_proc: subprocess.Popen | None = None
         self._starting = False
         self.log_queue: queue.Queue[str] = queue.Queue()
-        self.action_queue: queue.Queue[tuple[str, str | None]] = queue.Queue()
+        self.action_queue: queue.Queue[tuple[str, object | None]] = queue.Queue()
         self.vars: dict[str, tk.Variable] = {}
         self.field_meta: dict[str, dict] = {}
         self.model_rows: list[tuple[tk.StringVar, tk.StringVar]] = []
         self.prompt_rows: list[tuple[tk.StringVar, tk.StringVar, ScrolledText]] = []
         self._auto_start_attempted = False
         self._cancel_start = threading.Event()
+        self._qwen_status_checking = False
 
         self.cfg = load_config()
         self._build_ui()
         self._load_form_from_config()
+        self._update_asr_provider_ui()
         self._update_status()
         self._poll_log_queue()
+        self.root.after(250, self.refresh_qwen_status)
+        self.root.after(5000, self._periodic_qwen_status_refresh)
         self.root.after(150, self._maybe_auto_start_server)
         self.root.protocol("WM_DELETE_WINDOW", self._on_close)
 
@@ -263,32 +275,81 @@ class LauncherApp:
             parent.columnconfigure(i, weight=1)
 
         row = 0
-        self._add_choice(
+        provider_box = self._add_choice(
             parent, "asr_provider", "ASR Provider", ("asr", "provider"),
             ["whisper", "qwen3-asr"], row=row,
         )
         row += 1
-        self._add_entry(parent, "asr_model_id", "選択モデルID", ("asr", "model_id"), kind="str", row=row, width=20)
-        self._add_entry(parent, "asr_language", "言語", ("asr", "language"), kind="str", row=row, col=2, width=12)
-        row += 1
-        self._add_choice(parent, "asr_device", "Device", ("asr", "device"), ["cpu", "cuda"], row=row)
-        self._add_choice(parent, "asr_compute_type", "Compute Type", ("asr", "compute_type"), ["int8", "float16"], row=row, col=2)
-        row += 1
-        self._add_entry(parent, "asr_beam_size", "Beam Size", ("asr", "beam_size"), kind="int", row=row, width=12)
-        self._add_entry(parent, "asr_temperature", "Temperature", ("asr", "temperature"), kind="float", row=row, col=2, width=12)
-        row += 1
-        self._add_bool(parent, "asr_condition_prev", "前文脈を利用", ("asr", "condition_on_previous_text"), row=row)
-        row += 1
-        self._add_text(parent, "asr_initial_prompt", "Initial Prompt", ("asr", "initial_prompt"), row=row, height=5)
+
+        whisper_box = ttk.LabelFrame(parent, text="Whisper設定", padding=10)
+        whisper_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        self.whisper_settings_box = whisper_box
+        for i in range(4):
+            whisper_box.columnconfigure(i, weight=1)
+
+        whisper_row = 0
+        self._add_entry(whisper_box, "asr_model_id", "選択モデルID", ("asr", "model_id"), kind="str", row=whisper_row, width=20)
+        self._add_entry(whisper_box, "asr_language", "言語", ("asr", "language"), kind="str", row=whisper_row, col=2, width=12)
+        whisper_row += 1
+        self._add_choice(whisper_box, "asr_device", "Device", ("asr", "device"), ["cpu", "cuda"], row=whisper_row)
+        self._add_choice(whisper_box, "asr_compute_type", "Compute Type", ("asr", "compute_type"), ["int8", "float16"], row=whisper_row, col=2)
+        whisper_row += 1
+        self._add_entry(whisper_box, "asr_beam_size", "Beam Size", ("asr", "beam_size"), kind="int", row=whisper_row, width=12)
+        self._add_entry(whisper_box, "asr_temperature", "Temperature", ("asr", "temperature"), kind="float", row=whisper_row, col=2, width=12)
+        whisper_row += 1
+        self._add_bool(whisper_box, "asr_condition_prev", "前文脈を利用", ("asr", "condition_on_previous_text"), row=whisper_row)
+        whisper_row += 1
+        self._add_text(whisper_box, "asr_initial_prompt", "Initial Prompt", ("asr", "initial_prompt"), row=whisper_row, height=5)
+        whisper_row += 1
         row += 1
 
         qwen_box = ttk.LabelFrame(parent, text="Qwen3-ASR API", padding=10)
         qwen_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
-        for i in range(3):
+        self.qwen_settings_box = qwen_box
+        for i in range(4):
             qwen_box.columnconfigure(i, weight=1)
         qwen_row = 0
         self._add_entry(qwen_box, "qwen_base_url", "API URL", ("asr", "qwen", "base_url"), kind="str", row=qwen_row, width=36)
         qwen_row += 1
+        self._add_entry(
+            qwen_box, "qwen_timeout", "認識Timeout秒", ("asr", "qwen", "timeout_sec"),
+            kind="float", row=qwen_row, width=12,
+        )
+        self._add_entry(
+            qwen_box, "qwen_language", "言語", ("asr", "qwen", "language"),
+            kind="str", row=qwen_row, col=2, width=12,
+        )
+        qwen_row += 1
+        self._add_text(
+            qwen_box, "qwen_context", "Context", ("asr", "qwen", "context"),
+            row=qwen_row, height=4,
+        )
+        qwen_row += 1
+
+        status_box = ttk.LabelFrame(qwen_box, text="API稼働状況", padding=8)
+        status_box.grid(row=qwen_row, column=0, columnspan=4, sticky="nsew", pady=(6, 10))
+        status_box.columnconfigure(1, weight=1)
+        self.qwen_status_indicator = tk.Canvas(
+            status_box, width=18, height=18, highlightthickness=0, borderwidth=0
+        )
+        self.qwen_status_indicator.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.qwen_status_indicator_oval = self.qwen_status_indicator.create_oval(
+            2, 2, 16, 16, outline="", fill="#9ca3af"
+        )
+        self.qwen_status_var = tk.StringVar(value="未確認")
+        ttk.Label(status_box, textvariable=self.qwen_status_var, font=("", 10, "bold")).grid(
+            row=0, column=1, sticky="w"
+        )
+        ttk.Button(status_box, text="更新", command=self.refresh_qwen_status, width=8).grid(
+            row=0, column=2, sticky="e", padx=(8, 0)
+        )
+        self.qwen_status_details_var = tk.StringVar(value="/ready の応答を確認します。")
+        ttk.Label(
+            status_box, textvariable=self.qwen_status_details_var, wraplength=780,
+            justify="left",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(6, 0))
+        qwen_row += 1
+
         self._add_bool(
             qwen_box, "qwen_managed", "Windows GUIランチャーでQwenASRを起動・停止",
             ("asr", "qwen", "managed_by_launcher"), row=qwen_row,
@@ -315,7 +376,7 @@ class LauncherApp:
         )
         row += 1
 
-        vad_box = ttk.LabelFrame(parent, text="VAD", padding=10)
+        vad_box = ttk.LabelFrame(parent, text="VAD（Whisper / Qwen3-ASR 共通）", padding=10)
         vad_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
         for i in range(4):
             vad_box.columnconfigure(i, weight=1)
@@ -343,8 +404,8 @@ class LauncherApp:
         self._add_entry(vad_box, "vad_max_sec", "Max sec", ("vad", "max_sec"), kind="float", row=vad_row, col=2, width=12)
         row += 1
 
-        model_box = ttk.LabelFrame(parent, text="モデルIDとパス", padding=10)
-        model_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        model_box = ttk.LabelFrame(whisper_box, text="WhisperモデルIDとパス", padding=10)
+        model_box.grid(row=whisper_row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
         model_box.columnconfigure(1, weight=1)
 
         ttk.Label(model_box, text="ID").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 6))
@@ -372,6 +433,7 @@ class LauncherApp:
         btn_row = ttk.Frame(model_box)
         btn_row.grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Button(btn_row, text="行追加", command=self.add_model_row).pack(side="left")
+        provider_box.bind("<<ComboboxSelected>>", self._on_asr_provider_changed)
 
     def _build_llm_tab(self, parent: ttk.Frame) -> None:
         for i in range(4):
@@ -450,7 +512,7 @@ class LauncherApp:
         ttk.Entry(parent, textvariable=var).grid(row=row, column=1, sticky="we", padx=(0, 8), pady=6)
         ttk.Button(parent, text="参照", command=lambda: self._browse_named_path(name), width=8).grid(row=row, column=2, sticky="w", pady=6)
 
-    def _add_choice(self, parent, name: str, label: str, path: tuple[str, ...], choices: list[str], row: int, col: int = 0) -> None:
+    def _add_choice(self, parent, name: str, label: str, path: tuple[str, ...], choices: list[str], row: int, col: int = 0) -> ttk.Combobox:
         var = tk.StringVar()
         self.vars[name] = var
         self.field_meta[name] = {"path": path, "kind": "choice"}
@@ -458,6 +520,7 @@ class LauncherApp:
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", padx=(0, 8), pady=6)
         box = ttk.Combobox(parent, textvariable=var, values=choices, state="readonly", width=18)
         box.grid(row=row, column=col + 1, sticky="w", padx=(0, 16), pady=6)
+        return box
 
     def _add_bool(self, parent, name: str, label: str, path: tuple[str, ...], row: int, col: int = 0) -> None:
         var = tk.BooleanVar()
@@ -516,6 +579,9 @@ class LauncherApp:
         self._add_prompt_row_widgets(self.prompt_box, row_idx)
 
     def _load_form_from_config(self) -> None:
+        if hasattr(self, "whisper_settings_box"):
+            self._set_widget_tree_enabled(self.whisper_settings_box, True)
+            self._set_widget_tree_enabled(self.qwen_settings_box, True)
         self.cfg = load_config()
         for name, field in self.field_meta.items():
             path = field["path"]
@@ -528,6 +594,8 @@ class LauncherApp:
                 value = base.get(key, False if kind == "bool" else "")
             else:
                 fallback = FIELD_DEFAULTS.get(name, False if kind == "bool" else "")
+                if name == "qwen_context":
+                    fallback = get_nested(self.cfg, ("asr", "initial_prompt"), fallback)
                 value = get_nested(self.cfg, path, fallback)
 
             widget = self.vars[name]
@@ -570,7 +638,87 @@ class LauncherApp:
 
     def reload_form(self) -> None:
         self._load_form_from_config()
+        self._update_asr_provider_ui()
         self._append_log(f"[launcher] config reloaded: {CONFIG_PATH.name}")
+        self.refresh_qwen_status()
+
+    @staticmethod
+    def _set_widget_tree_enabled(widget: tk.Misc, enabled: bool) -> None:
+        for child in widget.winfo_children():
+            if isinstance(child, tk.Text):
+                child.configure(state="normal" if enabled else "disabled")
+            elif isinstance(child, ttk.Widget):
+                child.state(["!disabled"] if enabled else ["disabled"])
+            LauncherApp._set_widget_tree_enabled(child, enabled)
+
+    def _update_asr_provider_ui(self) -> None:
+        provider = self.vars["asr_provider"].get().strip().lower()
+        qwen_selected = provider in {"qwen", "qwen3-asr"}
+        self._set_widget_tree_enabled(self.whisper_settings_box, not qwen_selected)
+        self._set_widget_tree_enabled(self.qwen_settings_box, qwen_selected)
+
+    def _on_asr_provider_changed(self, _event=None) -> None:
+        self._update_asr_provider_ui()
+        provider = self.vars["asr_provider"].get().strip().lower()
+        if provider in {"qwen", "qwen3-asr"}:
+            self.refresh_qwen_status()
+
+    def refresh_qwen_status(self) -> None:
+        if self._qwen_status_checking:
+            return
+        base_url = self.vars["qwen_base_url"].get().strip()
+        if not base_url:
+            self._apply_qwen_status(QwenReadyStatus(False, False, None, {}, "API URLが空です。"))
+            return
+
+        self._qwen_status_checking = True
+        self.qwen_status_var.set("確認中...")
+        self.qwen_status_indicator.itemconfigure(self.qwen_status_indicator_oval, fill="#eab308")
+        threading.Thread(
+            target=self._fetch_qwen_status, args=(base_url,), daemon=True
+        ).start()
+
+    def _fetch_qwen_status(self, base_url: str) -> None:
+        status = fetch_qwen_ready_status(base_url)
+        self.action_queue.put(("qwen_status", status))
+
+    def _periodic_qwen_status_refresh(self) -> None:
+        provider = self.vars["asr_provider"].get().strip().lower()
+        if provider in {"qwen", "qwen3-asr"}:
+            self.refresh_qwen_status()
+        self.root.after(5000, self._periodic_qwen_status_refresh)
+
+    def _apply_qwen_status(self, status: QwenReadyStatus) -> None:
+        self._qwen_status_checking = False
+        payload = status.payload
+        if status.ready:
+            model = str(payload.get("model") or "-")
+            device = str(payload.get("device") or "-")
+            queue_depth = payload.get("queue_depth", "-")
+            queue_capacity = payload.get("queue_capacity", "-")
+            self.qwen_status_var.set(
+                f"Ready / model {model} / {device} / queue {queue_depth}/{queue_capacity}"
+            )
+            self.qwen_status_indicator.itemconfigure(
+                self.qwen_status_indicator_oval, fill="#16a34a"
+            )
+            details = [
+                f"model_id: {payload.get('model_id') or '-'}",
+                f"engine: {payload.get('engine') or '-'} / {payload.get('backend') or '-'}",
+                f"app: {payload.get('app_version') or '-'} / schema: {payload.get('schema_version') or '-'}",
+            ]
+            self.qwen_status_details_var.set("   ".join(details))
+            return
+
+        if status.reachable:
+            http_text = f"HTTP {status.http_status}" if status.http_status is not None else "応答あり"
+            self.qwen_status_var.set(f"未準備 / {http_text}")
+            color = "#eab308"
+        else:
+            self.qwen_status_var.set("接続不可")
+            color = "#dc2626"
+        self.qwen_status_indicator.itemconfigure(self.qwen_status_indicator_oval, fill=color)
+        self.qwen_status_details_var.set(status.error or "Ready応答を取得できませんでした。")
 
     def save_form(self) -> bool:
         cfg = load_config()
@@ -824,9 +972,12 @@ class LauncherApp:
             while True:
                 action, value = self.action_queue.get_nowait()
                 if action == "start_speechsummarizer":
+                    self.refresh_qwen_status()
                     self._start_speechsummarizer_process()
                 elif action == "managed_start_failed":
-                    self._managed_start_failed(value or "QwenASR start failed")
+                    self._managed_start_failed(str(value or "QwenASR start failed"))
+                elif action == "qwen_status" and isinstance(value, QwenReadyStatus):
+                    self._apply_qwen_status(value)
         except queue.Empty:
             pass
         try:
@@ -873,6 +1024,9 @@ def run_gui() -> None:
 
 
 def main() -> None:
+    if "--check-server-imports" in sys.argv[1:]:
+        import app as _server_import_check  # noqa: F401
+        return
     if "--server" in sys.argv[1:]:
         import app as server_app
 

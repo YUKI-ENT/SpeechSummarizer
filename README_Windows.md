@@ -7,9 +7,9 @@ PyInstallerのOneFolder形式でビルドし、配布用ZIPを作成するスク
 
 1. 既存のビルド結果を削除
 2. `launcher.py` をPyInstallerでGUIアプリ化
-3. Web UI用のstatic/templatesを同梱
-4. 設定サンプル、証明書、必要に応じて音声認識モデルをコピー
-5. 配布先との競合を避けるため、同梱された一部のVC++ Runtime DLLを削除
+3. 配布先との競合を避けるため、同梱された一部のVC++ Runtime DLLを削除
+4. Web UI、設定サンプル、証明書、必要に応じて音声認識モデルをコピー
+5. 配布EXEでサーバー依存moduleをimportできることを検査
 6. `release` フォルダに配布用ZIPを作成
 
 ## 必要な環境
@@ -26,11 +26,13 @@ Windows用EXEはWindows上でビルドしてください。LinuxやWSL上から�
 
 ## Qwen3-ASRをGUIランチャーから利用する
 
-QwenASRはSpeechSummarizerとは別のPython仮想環境に配置します。GUIランチャーのASRタブでproviderを`qwen3-asr`にし、「Windows GUIランチャーでQwenASRを起動・停止」を有効にして、次の3ファイルを指定してください。
+QwenASRはSpeechSummarizerとは別のPython仮想環境に配置します。GUIランチャーのASRタブでproviderを`qwen3-asr`にし、API URL、言語、Contextを設定します。providerを切り替えると、使用しない側の設定欄は無効になります。VADはSpeechSummarizer側の音声区間切り出しとして両providerで共通に使用します。「Windows GUIランチャーでQwenASRを起動・停止」を有効にする場合は、次の3ファイルも指定してください。
 
 - QwenASRの`.venv\Scripts\python.exe`
 - QwenASRの`server.py`
 - QwenASRの`config.json`
+
+「API稼働状況」には`/ready`から取得したReady状態、モデルサイズ（0.6b/1.7b等）、model ID、device、queue、API versionが表示されます。providerが`qwen3-asr`の間は5秒ごとに自動更新され、「更新」ボタンでも確認できます。
 
 「サーバー起動」を押すと、ランチャーはQwenASRを起動して`/ready`を待ち、その後にSpeechSummarizer本体を起動します。「サーバー停止」またはランチャー終了時には、ランチャー自身が起動したQwenASRも停止します。すでに手動起動されたQwenASRがreadyの場合はそのプロセスを利用し、ランチャーから停止しません。
 
@@ -64,7 +66,8 @@ python -m pip install pyinstaller
 ```
 
 > `build_windows.ps1` 自体は仮想環境の作成やパッケージのインストールを行いません。
-> 実行前に、ビルドに使う仮想環境を有効化してください。
+> リポジトリ内で有効化されたPython、`venv312`、`venv`の順にビルド用Pythonを探します。
+> 別の仮想環境を使う場合は`-PythonExe`で明示してください。QwenASR側の仮想環境は使用できません。
 
 現在使用されているPythonは、次のコマンドで確認できます。
 
@@ -166,6 +169,7 @@ powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1 `
 | `-DistDir` | 文字列 | `dist` | PyInstallerの完成品を置くフォルダ |
 | `-BuildDir` | 文字列 | `build` | PyInstallerの一時ビルドフォルダ |
 | `-OutDir` | 文字列 | `release` | 配布用ZIPを置くフォルダ |
+| `-PythonExe` | 文字列 | 自動検出 | SpeechSummarizer用仮想環境の`python.exe` |
 | `-IncludeModels` | 真偽値 | `$true` | `$true` なら `models` フォルダを配布物に含めます |
 
 すべて指定する場合の例：
@@ -177,6 +181,7 @@ powershell -ExecutionPolicy Bypass -File tools\build_windows.ps1 `
   -DistDir "dist" `
   -BuildDir "build" `
   -OutDir "release" `
+  -PythonExe ".\venv312\Scripts\python.exe" `
   -IncludeModels $true
 ```
 
@@ -225,15 +230,15 @@ release\
 過去のバージョンには、次のオプションが存在しました。
 
 ```text
--PythonExe
 -PythonVersion
 -Clean
 -NoZip
 ```
 
-これらは現在の `build_windows.ps1` では使用できません。
+これらは現在の `build_windows.ps1` では使用できません。`-PythonExe`は再び使用でき、
+ビルド環境を確実に指定する用途に使います。
 
-現在は、あらかじめ有効化した仮想環境の `python` を使用します。また、
+現在は、リポジトリ内のSpeechSummarizer用仮想環境を自動検出します。また、
 `dist` と `build` のクリーンアップおよびZIP作成は常に実行されます。
 
 ## トラブルシューティング
@@ -270,12 +275,15 @@ powershell -ExecutionPolicy Bypass -File .\venv\Scripts\Activate.ps1
 .\venv\Scripts\python.exe -m pip install pyinstaller
 ```
 
-ただし、ビルドスクリプトは現在の `python` コマンドを使用するため、ビルド時は
-仮想環境を有効化する方法を推奨します。
+ビルドにも同じPythonを明示できます。
+
+```powershell
+.\tools\build_windows.ps1 -PythonExe ".\venv\Scripts\python.exe"
+```
 
 ### `No module named PyInstaller` と表示される
 
-仮想環境を有効化してからPyInstallerをインストールします。
+SpeechSummarizer用仮想環境へPyInstallerをインストールします。
 
 ```powershell
 .\venv\Scripts\Activate.ps1
@@ -312,6 +320,14 @@ dist\SpeechSummarizer\_internal\base_library.zip
 ```
 
 意図した仮想環境のPythonでない場合は、仮想環境を有効化し直してから実行してください。
+または、次のように明示します。
+
+```powershell
+.\tools\build_windows.ps1 -PythonExe ".\venv312\Scripts\python.exe" -IncludeModels $false
+```
+
+スクリプトはビルド前に`PyInstaller`、`faster-whisper`、`ctranslate2`と64bit環境を検査します。
+不足があればZIPを作らずエラー終了します。
 
 ### ビルドしたアプリが起動しない
 

@@ -1,4 +1,4 @@
-# tools/build_windows.ps1
+﻿# tools/build_windows.ps1
 # Windows build: PyInstaller (onedir) -> trim VC++ runtime DLLs -> copy assets -> zip
 # Usage:
 #   .\tools\build_windows.ps1
@@ -10,6 +10,7 @@ param(
   [string]$DistDir = "dist",
   [string]$BuildDir = "build",
   [string]$OutDir = "release",
+  [string]$PythonExe = "",
   [bool]$IncludeModels = $true
 )
 
@@ -64,14 +65,52 @@ Push-Location $RepoRoot
 try {
   Assert-Exists $Entry
 
-  $py = (Get-Command python -ErrorAction Stop).Source
-  Write-Host "[build] python=$py"
+  $repoRootPath = [System.IO.Path]::GetFullPath([string]$RepoRoot)
+  if ($PythonExe) {
+    $pythonCandidate = if ([System.IO.Path]::IsPathRooted($PythonExe)) {
+      $PythonExe
+    }
+    else {
+      Join-Path $repoRootPath $PythonExe
+    }
+  }
+  else {
+    $activePythonCommand = Get-Command python -ErrorAction SilentlyContinue
+    $activePython = if ($activePythonCommand) { $activePythonCommand.Source } else { $null }
+    $localPythonCandidates = @(
+      (Join-Path $repoRootPath "venv312\Scripts\python.exe"),
+      (Join-Path $repoRootPath "venv\Scripts\python.exe")
+    )
+    $pythonCandidate = $null
+    if ($activePython) {
+      $activePythonPath = [System.IO.Path]::GetFullPath($activePython)
+      $repoPrefix = $repoRootPath.TrimEnd('\') + '\'
+      if ($activePythonPath.StartsWith($repoPrefix, [System.StringComparison]::OrdinalIgnoreCase)) {
+        $pythonCandidate = $activePythonPath
+      }
+    }
+    if (!$pythonCandidate) {
+      $pythonCandidate = $localPythonCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+    }
+  }
+
+  if (!$pythonCandidate -or !(Test-Path $pythonCandidate)) {
+    throw "SpeechSummarizer用Pythonが見つかりません。-PythonExe で仮想環境のpython.exeを指定してください。"
+  }
+  $buildPython = (Resolve-Path $pythonCandidate).Path
+  Write-Host "[build] python=$buildPython"
+
+  Write-Host "[build] checking required packages..."
+  & $buildPython -c "import struct; from importlib.metadata import version; import PyInstaller, faster_whisper, ctranslate2; assert struct.calcsize('P') * 8 == 64, '64-bit Python is required'; print('PyInstaller=' + version('pyinstaller')); print('faster-whisper=' + version('faster-whisper')); print('ctranslate2=' + version('ctranslate2'))"
+  if ($LASTEXITCODE -ne 0) {
+    throw "ビルド用Pythonに必須packageがありません。requirements.txt と PyInstaller をインストールしてください: $buildPython"
+  }
 
   Remove-TreeWithRetry $DistDir
   Remove-TreeWithRetry $BuildDir
 
   Write-Host "[build] PyInstaller onedir..."
-  python -m PyInstaller `
+  & $buildPython -m PyInstaller `
     --noconfirm --clean `
     --onedir `
     --windowed `
@@ -85,6 +124,17 @@ try {
     --add-data "tools\so_labeler\static;tools\so_labeler\static" `
     --add-data "tools\so_labeler\templates;tools\so_labeler\templates" `
     $Entry
+  if ($LASTEXITCODE -ne 0) {
+    throw "PyInstaller failed with exit code $LASTEXITCODE"
+  }
+
+  $warningFile = Join-Path (Join-Path $BuildDir $Name) "warn-$Name.txt"
+  if (Test-Path $warningFile) {
+    $missingRequired = Select-String -Path $warningFile -Pattern "missing module named (faster_whisper|ctranslate2)"
+    if ($missingRequired) {
+      throw "PyInstallerが必須ASR moduleを収集できませんでした: $($missingRequired.Line -join '; ')"
+    }
+  }
 
   $AppDir = Join-Path $DistDir $Name
   Assert-Exists $AppDir
@@ -135,6 +185,26 @@ try {
     else {
       Write-Host ("[pack] skip (not found): " + $it)
     }
+  }
+
+  Write-Host "[check] packaged server imports..."
+  $packagedExe = Join-Path $AppDir "$Name.exe"
+  $importCheck = Start-Process `
+    -FilePath $packagedExe `
+    -ArgumentList "--check-server-imports" `
+    -WorkingDirectory $AppDir `
+    -WindowStyle Hidden `
+    -PassThru
+  if (!$importCheck.WaitForExit(30000)) {
+    Stop-Process -Id $importCheck.Id -Force -ErrorAction SilentlyContinue
+    throw "配布EXEのserver import確認が30秒以内に完了しませんでした。"
+  }
+  if ($importCheck.ExitCode -ne 0) {
+    throw "配布EXEのserver import確認に失敗しました (exit=$($importCheck.ExitCode))"
+  }
+  if (Test-Path $packagedConfig) {
+    Remove-Item $packagedConfig -Force
+    Write-Host "[check] removed config.json created by import check"
   }
 
   if (!(Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }

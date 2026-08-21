@@ -1,10 +1,16 @@
+import io
 import json
 import tempfile
 import unittest
+import urllib.error
 from pathlib import Path
 from unittest.mock import patch
 
-from launcher_helpers import qwen_api_is_ready, resolve_launcher_path
+from launcher_helpers import (
+    fetch_qwen_ready_status,
+    qwen_api_is_ready,
+    resolve_launcher_path,
+)
 
 
 class FakeResponse:
@@ -31,14 +37,65 @@ class LauncherHelperTests(unittest.TestCase):
 
     @patch("launcher_helpers.urllib.request.urlopen")
     def test_qwen_ready_requires_schema_v1_ready(self, urlopen):
-        urlopen.return_value = FakeResponse(200, {"schema_version": 1, "status": "ready"})
+        urlopen.return_value = FakeResponse(200, {
+            "schema_version": 1,
+            "status": "ready",
+            "model": "1.7b",
+            "model_id": "Qwen/Qwen3-ASR-1.7B",
+        })
         self.assertTrue(qwen_api_is_ready("http://127.0.0.1:8010"))
         urlopen.assert_called_once_with("http://127.0.0.1:8010/ready", timeout=1.5)
+
+    @patch("launcher_helpers.urllib.request.urlopen")
+    def test_qwen_ready_status_keeps_model_details(self, urlopen):
+        payload = {
+            "schema_version": 1,
+            "status": "ready",
+            "model": "0.6b",
+            "model_id": "Qwen/Qwen3-ASR-0.6B",
+            "device": "cuda:0",
+            "queue_depth": 1,
+            "queue_capacity": 20,
+        }
+        urlopen.return_value = FakeResponse(200, payload)
+
+        status = fetch_qwen_ready_status("http://127.0.0.1:8010")
+
+        self.assertTrue(status.reachable)
+        self.assertTrue(status.ready)
+        self.assertEqual(status.http_status, 200)
+        self.assertEqual(status.payload, payload)
 
     @patch("launcher_helpers.urllib.request.urlopen")
     def test_qwen_not_ready_response_is_false(self, urlopen):
         urlopen.return_value = FakeResponse(503, {"schema_version": 1, "status": "loading"})
         self.assertFalse(qwen_api_is_ready("http://127.0.0.1:8010"))
+
+    @patch("launcher_helpers.urllib.request.urlopen")
+    def test_qwen_http_error_keeps_api_error_message(self, urlopen):
+        body = json.dumps({
+            "schema_version": 1,
+            "error": {"code": "not_ready", "message": "モデルをロード中です。"},
+        }).encode("utf-8")
+        urlopen.side_effect = urllib.error.HTTPError(
+            "http://127.0.0.1:8010/ready", 503, "Service Unavailable", {}, io.BytesIO(body)
+        )
+
+        status = fetch_qwen_ready_status("http://127.0.0.1:8010")
+
+        self.assertTrue(status.reachable)
+        self.assertFalse(status.ready)
+        self.assertEqual(status.http_status, 503)
+        self.assertEqual(status.error, "モデルをロード中です。")
+
+    @patch("launcher_helpers.urllib.request.urlopen")
+    def test_qwen_schema_mismatch_is_reported(self, urlopen):
+        urlopen.return_value = FakeResponse(200, {"schema_version": 2, "status": "ready"})
+
+        status = fetch_qwen_ready_status("http://127.0.0.1:8010")
+
+        self.assertFalse(status.ready)
+        self.assertEqual(status.error, "unsupported schema_version: 2")
 
 
 if __name__ == "__main__":
