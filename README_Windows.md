@@ -26,15 +26,15 @@ Windows用EXEはWindows上でビルドしてください。LinuxやWSL上から�
 
 ## Qwen3-ASRをGUIランチャーから利用する
 
-QwenASRはSpeechSummarizerとは別のPython仮想環境に配置します。GUIランチャーのASRタブでproviderを`qwen3-asr`にし、API URL、言語、Contextを設定します。providerを切り替えると、使用しない側の設定欄は無効になります。VADはSpeechSummarizer側の音声区間切り出しとして両providerで共通に使用します。「Windows GUIランチャーでQwenASRを起動・停止」を有効にする場合は、次の3ファイルも指定してください。
+QwenASRはWindows版の`QwenASR-Server.exe`を使用します。GUIランチャーのASRタブでproviderを`qwen3-asr`にし、API URL、言語、Contextを設定します。providerを切り替えると、使用しない側の設定欄は無効になります。VADはSpeechSummarizer側の音声区間切り出しとして両providerで共通に使用します。「Windows GUIランチャーでQwenASRを起動・停止」を有効にする場合は、次の2ファイルと起動モデルを指定してください。
 
-- QwenASRの`.venv\Scripts\python.exe`
-- QwenASRの`server.py`
-- QwenASRの`config.json`
+- `QwenASR-Server.exe`
+- EXE用の`config.json`
+- 起動モデル（`0.6b`または`1.7b`）
 
 「API稼働状況」には`/ready`から取得したReady状態、モデルサイズ（0.6b/1.7b等）、model ID、device、queue、API versionが表示されます。providerが`qwen3-asr`の間は5秒ごとに自動更新され、「更新」ボタンでも確認できます。
 
-「サーバー起動」を押すと、ランチャーはQwenASRを起動して`/ready`を待ち、その後にSpeechSummarizer本体を起動します。「サーバー停止」またはランチャー終了時には、ランチャー自身が起動したQwenASRも停止します。すでに手動起動されたQwenASRがreadyの場合はそのプロセスを利用し、ランチャーから停止しません。
+「サーバー起動」を押すと、ランチャーは`QwenASR-Server.exe --config ... --model 0.6b`（または`1.7b`）として起動し、`/ready`を待ってからSpeechSummarizer本体を起動します。QwenASRの`config.json`は書き換えません。「起動タイムアウト秒」は固定待機時間ではなく、モデル読込完了を`/ready`で待つ上限時間です。「Qwen再起動」ではモデル変更を反映できますが、ランチャー自身が起動したQwenASRだけが対象です。「サーバー停止」またはランチャー終了時には、ランチャー自身が起動したQwenASRも停止します。すでに手動起動されたQwenASRが選択モデルでreadyの場合はそのプロセスを利用し、ランチャーから停止しません。
 
 PythonからSpeechSummarizerの`app.py`を直接実行した場合、この自動管理は動作しません。その場合は従来どおりQwenASRを別途起動し、`config.json`でproviderとAPI URLを指定します。
 

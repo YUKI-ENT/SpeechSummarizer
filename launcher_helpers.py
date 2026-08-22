@@ -15,6 +15,21 @@ def resolve_launcher_path(value: str, app_dir: Path) -> Path:
     return path if path.is_absolute() else (app_dir / path).resolve()
 
 
+def build_qwen_server_command(
+    executable_path: Path, config_path: Path, model_alias: str
+) -> list[str]:
+    """Build the QwenASR server command without modifying its config file."""
+    if model_alias not in {"0.6b", "1.7b"}:
+        raise ValueError(f"unsupported Qwen model: {model_alias}")
+    return [
+        str(executable_path),
+        "--config",
+        str(config_path),
+        "--model",
+        model_alias,
+    ]
+
+
 @dataclass(frozen=True)
 class QwenReadyStatus:
     reachable: bool

@@ -193,7 +193,7 @@ localhostのQwen3-ASR APIを使う設定:
 
 起動前に `curl http://127.0.0.1:8010/ready` でQwen3-ASR側が `status: ready` を返すことを確認してください。Qwen側のモデルはAPIサーバー起動時に固定されます。SpeechSummarizerは`/ready`と認識応答から実際のモデル名を取得するため、Qwenのモデル変更時にSpeechSummarizer側の設定を同期する必要はありません。クライアントのモデル名は`asr.provider`と実モデル名を組み合わせ、たとえば`qwen3-asr:1.7b`と表示します。
 
-Windows GUIランチャーから利用する場合は、ASRタブでproviderを`qwen3-asr`にし、API URL、言語、Contextを設定できます。API稼働状況には`/ready`から取得したReady状態、モデルサイズ（0.6b/1.7b等）、model ID、device、queue、API versionが表示されます。「Windows GUIランチャーでQwenASRを起動・停止」を有効にしてQwenASR側のPython、`server.py`、`config.json`を指定すると、ランチャーはQwenASRを先に起動し、`/ready`を確認してからSpeechSummarizer本体を起動します。ランチャーが起動したQwenASRは、サーバー停止時とランチャー終了時に一緒に停止します。すでに同じURLでQwenASRがreadyの場合は外部プロセスとして利用し、ランチャーからは停止しません。
+Windows GUIランチャーから利用する場合は、ASRタブでproviderを`qwen3-asr`にし、API URL、言語、Contextを設定できます。API稼働状況には`/ready`から取得したReady状態、モデルサイズ（0.6b/1.7b等）、model ID、device、queue、API versionが表示されます。「Windows GUIランチャーでQwenASRを起動・停止」を有効にして`QwenASR-Server.exe`、`config.json`、起動モデル（0.6b/1.7b）を指定すると、ランチャーは`--config`と`--model`を付けてQwenASRを先に起動し、`/ready`を確認してからSpeechSummarizer本体を起動します。QwenASRの設定ファイルは書き換えません。「Qwen再起動」でモデル変更を反映できます。ランチャーが起動したQwenASRは、サーバー停止時とランチャー終了時に一緒に停止します。すでに同じURL・選択モデルでQwenASRがreadyの場合は外部プロセスとして利用し、ランチャーからは停止しません。
 
 Pythonから`app.py`を直接起動する場合、ランチャーによるプロセス管理は行われません。従来どおり`config.json`のproviderとAPI URLを使い、QwenASRは別途起動してください。
 
