@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Optional
 import shutil
 
-import requests
+from llm_openai_compat import list_openai_models, openai_chat_text
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import HTMLResponse
@@ -125,19 +125,13 @@ def _debug_dump(label: str, payload: Any) -> None:
     _debug_log(f"{label}\n{text}")
 
 
-def _summarize_ollama_response(data: dict[str, Any]) -> dict[str, Any]:
+def _summarize_openai_response(data: dict[str, Any]) -> dict[str, Any]:
     return {
+        "id": data.get("id"),
         "model": data.get("model"),
-        "created_at": data.get("created_at"),
-        "done": data.get("done"),
-        "done_reason": data.get("done_reason"),
-        "response": data.get("response"),
-        "total_duration": data.get("total_duration"),
-        "load_duration": data.get("load_duration"),
-        "prompt_eval_count": data.get("prompt_eval_count"),
-        "prompt_eval_duration": data.get("prompt_eval_duration"),
-        "eval_count": data.get("eval_count"),
-        "eval_duration": data.get("eval_duration"),
+        "created": data.get("created"),
+        "usage": data.get("usage"),
+        "finish_reason": ((data.get("choices") or [{}])[0]).get("finish_reason"),
     }
 
 
@@ -628,44 +622,41 @@ def _merge_suggestion_items(chunks: list[list[dict[str, Any]]]) -> list[dict[str
     )
 
 
-def _suggest_with_ollama(request: Request, transcript: str, model: str, prompt_id: str) -> list[dict]:
+def _suggest_with_openai(request: Request, transcript: str, model: str, prompt_id: str) -> list[dict]:
     llm_cfg = getattr(request.app.state, "llm_config", None) or {}
-    base_url = str(llm_cfg.get("base_url") or "http://127.0.0.1:11434")
+    base_url = str(llm_cfg.get("base_url") or "http://127.0.0.1:1234/v1")
+    api_key = str(llm_cfg.get("api_key") or "")
     timeout_sec = float(llm_cfg.get("timeout_sec") or 120)
     temperature = float(llm_cfg.get("temperature") or 0.0)
     top_p = float(llm_cfg.get("top_p") or 0.9)
     _, templates, default_prompt_id = _prompt_items(request)
     template = templates.get(prompt_id or default_prompt_id) or next(iter(templates.values()))
     prompt = _build_correction_prompt(template, transcript)
-    body = {
-        "model": model or str(llm_cfg.get("model") or "qwen3.5:9b"),
-        "prompt": prompt,
-        "stream": False,
-        "think": False,
-        "format": "json",
-        "options": {"temperature": temperature, "top_p": top_p},
-    }
+    selected_model = model or str(llm_cfg.get("model") or "local-model")
     _debug_log(
-        f"[correction_tool][ollama_start] model={body['model']} prompt_id={prompt_id or default_prompt_id} "
+        f"[correction_tool][openai_start] model={selected_model} prompt_id={prompt_id or default_prompt_id} "
         f"base_url={base_url.rstrip('/')} prompt_chars={len(prompt)} transcript_chars={len(transcript)}"
     )
-    _debug_dump("[correction_tool][ollama_request]", body)
-    resp = requests.post(base_url.rstrip("/") + "/api/generate", json=body, timeout=timeout_sec)
-    resp.raise_for_status()
-    _debug_log(f"[correction_tool][ollama_http] status={resp.status_code}")
-    _debug_log(f"[correction_tool][ollama_raw_response]\n{resp.text}")
-    data = resp.json()
-    _debug_dump("[correction_tool][ollama_response_summary]", _summarize_ollama_response(data))
-    text = _strip_think_blocks(str(data.get("response") or ""))
-    _debug_log(f"[correction_tool][ollama_done] response_chars={len(text)}")
+    text, data = openai_chat_text(
+        base_url=base_url,
+        api_key=api_key,
+        model=selected_model,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    _debug_dump("[correction_tool][openai_response_summary]", _summarize_openai_response(data))
+    text = _strip_think_blocks(text)
+    _debug_log(f"[correction_tool][openai_done] response_chars={len(text)}")
     if not text.strip():
-        _debug_log("[correction_tool][ollama_done] empty response text")
+        _debug_log("[correction_tool][openai_done] empty response text")
         return []
     try:
         payload = json.loads(text)
     except json.JSONDecodeError:
         payload = json.loads(_extract_first_json_value(text))
-    _debug_dump("[correction_tool][ollama_parsed_payload]", payload)
+    _debug_dump("[correction_tool][openai_parsed_payload]", payload)
     arr = _normalize_suggestion_payload(payload)
     out = []
     for item in arr:
@@ -678,7 +669,7 @@ def _suggest_with_ollama(request: Request, transcript: str, model: str, prompt_i
             "correct": correct,
             "reason": str(item.get("reason") or "").strip(),
         })
-    _debug_dump("[correction_tool][ollama_filtered_items]", out)
+    _debug_dump("[correction_tool][openai_filtered_items]", out)
     return out
 
 
@@ -693,8 +684,8 @@ def api_config(request: Request):
     items, _, default_prompt_id = _prompt_items(request)
     return {
         "default_data_dir": getattr(request.app.state, "default_data_dir", str(BASE_DIR.parent.parent / "data")),
-        "llm_base_url": str(llm_cfg.get("base_url") or "http://127.0.0.1:11434"),
-        "llm_model": str(llm_cfg.get("model") or "qwen3.5:9b"),
+        "llm_base_url": str(llm_cfg.get("base_url") or "http://127.0.0.1:1234/v1"),
+        "llm_model": str(llm_cfg.get("model") or "local-model"),
         "prompt_items": items,
         "default_prompt_id": default_prompt_id,
         "correction_rules_path": str(getattr(request.app.state, "correction_rules_path", BASE_DIR.parent.parent / "corrections.json")),
@@ -702,14 +693,15 @@ def api_config(request: Request):
     }
 
 
-@app.get("/api/ollama_models")
-def api_ollama_models(request: Request):
+@app.get("/api/llm_models")
+def api_llm_models(request: Request):
     llm_cfg = getattr(request.app.state, "llm_config", None) or {}
     try:
-        resp = requests.get(str(llm_cfg.get("base_url") or "http://127.0.0.1:11434").rstrip("/") + "/api/tags", timeout=float(llm_cfg.get("timeout_sec") or 120))
-        resp.raise_for_status()
-        data = resp.json()
-        models = sorted([str(item.get("name") or "").strip() for item in data.get("models") or [] if item.get("name")])
+        models = list_openai_models(
+            str(llm_cfg.get("base_url") or "http://127.0.0.1:1234/v1"),
+            api_key=str(llm_cfg.get("api_key") or ""),
+            timeout_sec=float(llm_cfg.get("timeout_sec") or 120),
+        )
         return {"ok": True, "models": models, "default_model": str(llm_cfg.get("model") or "")}
     except Exception as e:
         return {"ok": False, "models": [], "default_model": str(llm_cfg.get("model") or ""), "error": str(e)}
@@ -815,7 +807,7 @@ def api_suggest(request: Request, req: SuggestRequest):
                     "transcript": chunk_transcript,
                 },
             )
-            items = _suggest_with_ollama(request, chunk_transcript, req.model, req.prompt_id)
+            items = _suggest_with_openai(request, chunk_transcript, req.model, req.prompt_id)
             chunk_items = []
             for item in items:
                 chunk_items.append({

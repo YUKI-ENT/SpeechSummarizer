@@ -12,13 +12,13 @@ from fastapi.staticfiles import StaticFiles
 
 try:
     from .jsonl_loader import list_jsonl_files, load_asr_events
-    from .llm_client import DEFAULT_BOUNDARY_PROMPT_TEMPLATE, LlmConfig, label_session_stub, label_session_with_ollama, list_ollama_models
+    from .llm_client import DEFAULT_BOUNDARY_PROMPT_TEMPLATE, LlmConfig, label_session_stub, label_session_with_openai, list_openai_models
     from .models import BatchSessionLabelRequest, ExtractRuleRequest, FileListRequest, SaveReviewRequest, SessionCandidate, SessionCandidateRequest, TranscriptTurn
     from .reviewer_store import append_review_record, make_review_record
     from .rule_extractor import extract_rules
 except ImportError:
     from jsonl_loader import list_jsonl_files, load_asr_events
-    from llm_client import DEFAULT_BOUNDARY_PROMPT_TEMPLATE, LlmConfig, label_session_stub, label_session_with_ollama, list_ollama_models
+    from llm_client import DEFAULT_BOUNDARY_PROMPT_TEMPLATE, LlmConfig, label_session_stub, label_session_with_openai, list_openai_models
     from models import BatchSessionLabelRequest, ExtractRuleRequest, FileListRequest, SaveReviewRequest, SessionCandidate, SessionCandidateRequest, TranscriptTurn
     from reviewer_store import append_review_record, make_review_record
     from rule_extractor import extract_rules
@@ -60,8 +60,9 @@ def _debug_log(message: str) -> None:
 def _llm_config_from_state(request: Request) -> LlmConfig:
     data = getattr(request.app.state, 'llm_config', None) or {}
     return LlmConfig(
-        base_url=str(data.get('base_url') or 'http://127.0.0.1:11434'),
-        model=str(data.get('model') or 'qwen3.5:9b'),
+        base_url=str(data.get('base_url') or 'http://127.0.0.1:1234/v1'),
+        api_key=str(data.get('api_key') or ''),
+        model=str(data.get('model') or 'local-model'),
         timeout_sec=int(data.get('timeout_sec') or 120),
         temperature=float(data.get('temperature') or 0.0),
         top_p=float(data.get('top_p') or 0.9),
@@ -121,11 +122,11 @@ def api_config(request: Request):
     }
 
 
-@app.get('/api/ollama_models')
-def api_ollama_models(request: Request):
+@app.get('/api/llm_models')
+def api_llm_models(request: Request):
     llm_cfg = _llm_config_from_state(request)
     try:
-        models = list_ollama_models(llm_cfg)
+        models = list_openai_models(llm_cfg)
         return {'ok': True, 'models': models, 'default_model': llm_cfg.model}
     except Exception as e:
         return {'ok': False, 'models': [], 'default_model': llm_cfg.model, 'error': str(e)}
@@ -153,8 +154,8 @@ def api_label_sessions(req: BatchSessionLabelRequest, request: Request):
     total = len(req.sessions)
     _debug_log(
         f'[so_labeler][label_sessions_start] total={total} mode={req.mode} '
-        f'model={model if req.mode == "ollama" else ""} '
-        f'prompt_id={prompt_id if req.mode == "ollama" else ""} timeout={llm_cfg.timeout_sec}s'
+        f'model={model if req.mode == "openai" else ""} '
+        f'prompt_id={prompt_id if req.mode == "openai" else ""} timeout={llm_cfg.timeout_sec}s'
     )
     batch_started = time.perf_counter()
     items = []
@@ -166,11 +167,11 @@ def api_label_sessions(req: BatchSessionLabelRequest, request: Request):
             f'turns={len(session.turns)} transcript_preview={preview!r}'
         )
         try:
-            if req.mode == 'ollama':
-                llm = label_session_with_ollama(session, llm_cfg, model=model, prompt_template=prompt_template)
+            if req.mode == 'openai':
+                llm = label_session_with_openai(session, llm_cfg, model=model, prompt_template=prompt_template)
             else:
                 llm = label_session_stub(session)
-            record = make_review_record(session, llm, req.mode, model if req.mode == 'ollama' else '', prompt_id if req.mode == 'ollama' else '')
+            record = make_review_record(session, llm, req.mode, model if req.mode == 'openai' else '', prompt_id if req.mode == 'openai' else '')
             items.append(record.model_dump())
             _debug_log(
                 f'[so_labeler][session_done] {idx}/{total} session_id={session.session_id} '
@@ -183,8 +184,8 @@ def api_label_sessions(req: BatchSessionLabelRequest, request: Request):
                 detail={
                     'message': str(e),
                     'session_id': session.session_id,
-                    'model': model if req.mode == 'ollama' else '',
-                    'prompt_id': prompt_id if req.mode == 'ollama' else '',
+                    'model': model if req.mode == 'openai' else '',
+                    'prompt_id': prompt_id if req.mode == 'openai' else '',
                     'mode': req.mode,
                     'session_index': idx,
                     'session_total': total,

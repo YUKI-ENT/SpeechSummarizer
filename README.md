@@ -3,7 +3,7 @@
 SpeechSummarizer は、医療現場向けに設計されたリアルタイム音声認識＋AI要約システムです。
 - Faster-Whisper による音声認識（ASR）
 - GPU / CPU 両対応
-- Ollama 連携による SOAP 形式などの要約生成
+- OpenAI互換API連携による SOAP 形式などの要約生成（LM Studio、FreeTokensなど）
 - Windows EXE / Python 実行 両対応
 - ローカルモデル運用（インターネット不要）
 - 難聴モード（大字幕表示）
@@ -120,12 +120,34 @@ pip install -r requirements.txt
       },
     ```
 - llmセクション
-  - host:
-    ollamaの稼働しているアドレスを指定します
+  - server / port:
+    OpenAI互換APIのサーバーとポートを指定します。`server: "127.0.0.1"`, `port: 11434` なら、内部では `http://127.0.0.1:11434/v1` に接続します。
+  - use_https:
+    HTTPSを使う外部APIでは `true` にします。ローカルのOllamaやLM Studioでは通常 `false` です。
+  - api_key:
+    APIがBearer認証を要求する場合のAPIキーです。LM Studioで認証を有効にしていなければ空欄で構いません。
+  - api_key_env:
+    APIキーを直接保存したくない場合の環境変数名です。`api_key` が空のときだけ参照します。
   - model_default:
     デフォルトで使用するllmモデル名を指定します
   - default_prompt_id：
     デフォルトで使用するプロンプト名を下記の一覧にあるものを指定します
+
+  設定例:
+
+  ```json
+  "llm": {
+    "server": "127.0.0.1",
+    "port": 11434,
+    "use_https": false,
+    "api_key": "",
+    "api_key_env": "",
+    "model_default": "使用するモデルID"
+  }
+  ```
+
+  APIキーが必要なサービスでは `api_key` に設定するか、たとえば `api_key_env` を `OPENAI_API_KEY` にして、その環境変数へキーを設定してください。
+
   - prompts セクション
     - 自由に追加できます。こちらの例を参考に追加してみてください。
       ```

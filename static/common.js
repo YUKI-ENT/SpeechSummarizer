@@ -303,13 +303,16 @@
     try {
       const r = await fetch('/api/llm/models');
       const j = await r.json();
-      llmModelList = j.ok ? (j.models || []) : [];
+      const models = Array.isArray(j.models) ? j.models.filter(Boolean) : [];
+      if (j.default_model) models.unshift(j.default_model);
+      llmModelList = [...new Set(models)];
       // hidden select も更新
       if (selLlmModel) {
         selLlmModel.innerHTML = '<option value="">LLM model...</option>' +
-          llmModelList.map(m => `<option value="${m}">${m}</option>`).join('');
+          llmModelList.map(m => `<option value="${e_(m)}">${e_(m)}</option>`).join('');
         if (j.default_model) selLlmModel.value = j.default_model;
       }
+      if (!j.ok) log(`[ui] LLMモデル一覧を取得できないため既定モデルを使用: ${j.error || r.status}`);
     } catch (e) { log(`[ui] loadLlmModels failed: ${e}`); }
   }
 

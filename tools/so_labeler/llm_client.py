@@ -4,9 +4,7 @@ import json
 import logging
 import time
 from dataclasses import dataclass
-from typing import Any
-
-import requests
+from llm_openai_compat import list_openai_models as fetch_openai_models, openai_chat_text
 
 try:
     from .models import SessionBoundaryLabelResult, SessionCandidate
@@ -57,22 +55,21 @@ STUB_TRIGGER_PHRASES = [
 
 @dataclass
 class LlmConfig:
-    base_url: str = 'http://127.0.0.1:11434'
-    model: str = 'qwen3.5:9b'
+    base_url: str = 'http://127.0.0.1:1234/v1'
+    api_key: str = ''
+    model: str = 'local-model'
     timeout_sec: int = 120
     temperature: float = 0.0
     top_p: float = 0.9
 
 
-def list_ollama_models(cfg: LlmConfig) -> list[str]:
-    url = cfg.base_url.rstrip('/') + '/api/tags'
-    _debug_log(f'[so_labeler][ollama_models] GET {url} timeout={cfg.timeout_sec}s')
-    resp = requests.get(url, timeout=cfg.timeout_sec)
-    resp.raise_for_status()
-    data = resp.json()
-    items = data.get('models') or []
-    names = [str(item.get('name') or '').strip() for item in items if item.get('name')]
-    return sorted(names)
+def list_openai_models(cfg: LlmConfig) -> list[str]:
+    _debug_log(f'[so_labeler][openai_models] base_url={cfg.base_url} timeout={cfg.timeout_sec}s')
+    return fetch_openai_models(
+        cfg.base_url,
+        api_key=cfg.api_key,
+        timeout_sec=cfg.timeout_sec,
+    )
 
 
 def transcript_text(session: SessionCandidate) -> str:
@@ -142,59 +139,46 @@ def parse_llm_json(text: str) -> SessionBoundaryLabelResult:
     return SessionBoundaryLabelResult(**obj)
 
 
-def label_session_with_ollama(
+def label_session_with_openai(
     session: SessionCandidate,
     cfg: LlmConfig,
     *,
     model: str | None = None,
     prompt_template: str | None = None,
 ) -> SessionBoundaryLabelResult:
-    url = cfg.base_url.rstrip('/') + '/api/generate'
     selected_model = model or cfg.model
     prompt_text = build_user_prompt(session, prompt_template)
-    full_prompt = f'{SYSTEM_PROMPT}\n\n{prompt_text}'
-    body: dict[str, Any] = {
-        'model': selected_model,
-        'stream': False,
-        'format': 'json',
-        'prompt': full_prompt,
-        'think': False,
-        'options': {
-            'temperature': cfg.temperature,
-            'top_p': cfg.top_p,
-        },
-    }
-    prompt_preview = full_prompt[:240].replace('\n', ' ')
+    prompt_preview = prompt_text[:240].replace('\n', ' ')
     _debug_log(
-        f'[so_labeler][ollama_start] session_id={session.session_id} model={selected_model} '
-        f'timeout={cfg.timeout_sec}s prompt_chars={len(full_prompt)} prompt_preview={prompt_preview!r}'
+        f'[so_labeler][openai_start] session_id={session.session_id} model={selected_model} '
+        f'timeout={cfg.timeout_sec}s prompt_chars={len(prompt_text)} prompt_preview={prompt_preview!r}'
     )
     started = time.perf_counter()
     try:
-        resp = requests.post(url, json=body, timeout=cfg.timeout_sec)
+        content, data = openai_chat_text(
+            base_url=cfg.base_url,
+            api_key=cfg.api_key,
+            model=selected_model,
+            prompt=prompt_text,
+            system_prompt=SYSTEM_PROMPT,
+            timeout_sec=cfg.timeout_sec,
+            temperature=cfg.temperature,
+            top_p=cfg.top_p,
+        )
         elapsed = time.perf_counter() - started
         _debug_log(
-            f'[so_labeler][ollama_http] session_id={session.session_id} '
-            f'status={resp.status_code} elapsed={elapsed:.2f}s bytes={len(resp.content or b"")}'
-        )
-        resp.raise_for_status()
-        data = resp.json()
-        content = str(data.get('response') or '')
-        _debug_log(
-            f'[so_labeler][ollama_json] session_id={session.session_id} '
-            f'keys={sorted(data.keys())} response_chars={len(content)} '
-            f'thinking_chars={len(str(data.get("thinking") or ""))} '
-            f'done={data.get("done")} done_reason={data.get("done_reason")!r}'
+            f'[so_labeler][openai_response] session_id={session.session_id} '
+            f'id={data.get("id", "")} response_chars={len(content)} elapsed={elapsed:.2f}s'
         )
         _debug_log(
-            f'[so_labeler][ollama_content] session_id={session.session_id} '
+            f'[so_labeler][openai_content] session_id={session.session_id} '
             f'content_chars={len(content)} content_preview={content[:240]!r}'
         )
         if not content.strip():
-            raise ValueError(f'empty response from Ollama: keys={sorted(data.keys())} done_reason={data.get("done_reason")!r}')
+            raise ValueError(f'empty response from OpenAI-compatible API: keys={sorted(data.keys())}')
         result = parse_llm_json(content)
         _debug_log(
-            f'[so_labeler][ollama_done] session_id={session.session_id} '
+            f'[so_labeler][openai_done] session_id={session.session_id} '
             f'has_boundary={result.has_boundary} boundary_index={result.boundary_index} '
             f'confidence={result.confidence} trigger={result.trigger_text!r} elapsed={elapsed:.2f}s'
         )
@@ -202,7 +186,7 @@ def label_session_with_ollama(
     except Exception:
         elapsed = time.perf_counter() - started
         logger.exception(
-            '[so_labeler][ollama_error] session_id=%s model=%s elapsed=%.2fs',
+            '[so_labeler][openai_error] session_id=%s model=%s elapsed=%.2fs',
             session.session_id,
             selected_model,
             elapsed,

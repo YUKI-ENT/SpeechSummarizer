@@ -8,6 +8,7 @@ import threading
 import time
 import webbrowser
 from pathlib import Path
+from urllib.parse import urlparse
 import tkinter as tk
 from tkinter import filedialog, messagebox, ttk
 from tkinter.scrolledtext import ScrolledText
@@ -448,11 +449,17 @@ class LauncherApp:
     def _build_llm_tab(self, parent: ttk.Frame) -> None:
         for i in range(4):
             parent.columnconfigure(i, weight=1)
-        parent.rowconfigure(4, weight=1)
+        parent.rowconfigure(6, weight=1)
 
         row = 0
-        self._add_entry(parent, "llm_host", "Host", ("llm", "host"), kind="str", row=row, width=32)
+        self._add_entry(parent, "llm_server", "LLMサーバー", ("llm", "server"), kind="str", row=row, width=32)
+        self._add_entry(parent, "llm_port", "Port", ("llm", "port"), kind="int", row=row, col=2, width=12)
+        row += 1
+        self._add_bool(parent, "llm_use_https", "HTTPS", ("llm", "use_https"), row=row)
         self._add_entry(parent, "llm_model_default", "既定モデル", ("llm", "model_default"), kind="str", row=row, col=2, width=20)
+        row += 1
+        self._add_entry(parent, "llm_api_key", "API Key", ("llm", "api_key"), kind="str", row=row, width=32, show="*")
+        self._add_entry(parent, "llm_api_key_env", "API Key環境変数", ("llm", "api_key_env"), kind="str", row=row, col=2, width=20)
         row += 1
         self._add_entry(parent, "llm_timeout", "Timeout", ("llm", "timeout"), kind="float", row=row, width=12)
         self._add_entry(parent, "llm_temperature", "Temperature", ("llm", "temperature"), kind="float", row=row, col=2, width=12)
@@ -505,13 +512,13 @@ class LauncherApp:
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(state="disabled")
 
-    def _add_entry(self, parent, name: str, label: str, path: tuple[str, ...], kind: str, row: int, col: int = 0, width: int = 24) -> None:
+    def _add_entry(self, parent, name: str, label: str, path: tuple[str, ...], kind: str, row: int, col: int = 0, width: int = 24, show: str = "") -> None:
         var = tk.StringVar()
         self.vars[name] = var
         self.field_meta[name] = {"path": path, "kind": kind}
 
         ttk.Label(parent, text=label).grid(row=row, column=col, sticky="w", padx=(0, 8), pady=6)
-        ttk.Entry(parent, textvariable=var, width=width).grid(row=row, column=col + 1, sticky="we", padx=(0, 16), pady=6)
+        ttk.Entry(parent, textvariable=var, width=width, show=show).grid(row=row, column=col + 1, sticky="we", padx=(0, 16), pady=6)
 
     def _add_path_entry(self, parent, name: str, label: str, path: tuple[str, ...], row: int, select: str) -> None:
         var = tk.StringVar()
@@ -607,6 +614,24 @@ class LauncherApp:
                 if name == "qwen_context":
                     fallback = get_nested(self.cfg, ("asr", "initial_prompt"), fallback)
                 value = get_nested(self.cfg, path, fallback)
+                if name in {"llm_server", "llm_port", "llm_use_https"} and value in (None, "", False):
+                    old_url = str(
+                        get_nested(self.cfg, ("llm", "base_url"), "")
+                        or get_nested(self.cfg, ("llm", "host"), "")
+                        or ""
+                    ).strip()
+                    if old_url:
+                        parsed = urlparse(old_url if "://" in old_url else f"http://{old_url}")
+                        if name == "llm_server":
+                            value = parsed.hostname or "127.0.0.1"
+                        elif name == "llm_port":
+                            value = parsed.port or (443 if parsed.scheme == "https" else 11434)
+                        else:
+                            value = parsed.scheme == "https"
+                    elif name == "llm_server":
+                        value = "127.0.0.1"
+                    elif name == "llm_port":
+                        value = 11434
 
             widget = self.vars[name]
             if kind == "bool":
@@ -776,6 +801,11 @@ class LauncherApp:
             if isinstance(qwen_cfg, dict):
                 qwen_cfg.pop("python_executable", None)
                 qwen_cfg.pop("server_script", None)
+
+            llm_cfg = get_nested(cfg, ("llm",), {})
+            if isinstance(llm_cfg, dict):
+                llm_cfg.pop("host", None)
+                llm_cfg.pop("base_url", None)
 
             if not get_nested(cfg, ("asr", "model_id"), "").strip():
                 raise ValueError("asr.model_id が空です。")

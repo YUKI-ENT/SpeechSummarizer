@@ -344,7 +344,7 @@ async function loadConfig() {
   clearSelectionSource();
   await loadRules();
 
-  getJson(`${API_BASE}/ollama_models`)
+  getJson(`${API_BASE}/llm_models`)
     .then((data) => {
       if (data.models && data.models.length) {
         populateLlmModels(data.models);

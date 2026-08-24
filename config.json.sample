@@ -74,8 +74,12 @@
   },
 
   "llm": {
-    "host": "http://127.0.0.1:11434",
-    "model_default": "gemma3:12b",
+    "server": "127.0.0.1",
+    "port": 11434,
+    "use_https": false,
+    "api_key": "",
+    "api_key_env": "",
+    "model_default": "gemma4:12b",
     "timeout": 120,
     "temperature": 0.0,
     "top_p": 0.9,
@@ -114,7 +118,7 @@
   "auto_llm": false,
   "auto_llm_prompts": [
     {
-      "model_id": "gpt-oss:20b",
+      "model_id": "gemma4:12b",
       "prompt_id": "soap_v1",
       "asr_correct": true
     }

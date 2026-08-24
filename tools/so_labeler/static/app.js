@@ -106,7 +106,7 @@ async function loadConfig() {
   setPromptOptions(cfg.prompt_items || [], cfg.default_prompt_id || '');
   qs('llmInfo').value = `${cfg.llm_model || ''} @ ${cfg.llm_base_url || ''}`.trim();
   setDefaultDateRange();
-  await loadOllamaModels(cfg.llm_model || '');
+  await loadLlmModels(cfg.llm_model || '');
 }
 
 function setPromptOptions(items, defaultPromptId) {
@@ -123,11 +123,11 @@ function setPromptOptions(items, defaultPromptId) {
   });
 }
 
-async function loadOllamaModels(defaultModel) {
+async function loadLlmModels(defaultModel) {
   const select = qs('llmModel');
   select.innerHTML = '';
   try {
-    const res = await fetch(`${API_BASE}/ollama_models`);
+    const res = await fetch(`${API_BASE}/llm_models`);
     if (!res.ok) {
       throw new Error(await res.text());
     }
@@ -151,7 +151,7 @@ async function loadOllamaModels(defaultModel) {
     option.textContent = defaultModel || 'model unavailable';
     option.selected = true;
     select.appendChild(option);
-    console.error('failed to load ollama models', err);
+    console.error('failed to load LLM models', err);
   }
 }
 

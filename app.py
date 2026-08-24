@@ -17,6 +17,7 @@ import shutil
 from typing import Any, Dict, List, Optional
 from app_version import APP_VERSION
 from asr_providers import asr_model_label, create_asr_provider
+from llm_openai_compat import build_openai_base_url, list_openai_models, openai_chat_text
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
@@ -27,7 +28,6 @@ from tools.correction_tool.app import app as correction_tool_app
 from tools.so_labeler.app import app as so_labeler_app
 import uvicorn
 from faster_whisper import WhisperModel
-import httpx
 import hashlib
 # from datetime import datetime, timedelta
 
@@ -528,15 +528,26 @@ def append_asr_config_event(reason: str):
         log(f"[ASR] append_asr_config_event failed: {e}")
 
 # -------------------------
-# LLM (Ollama) - config.json の llm から読む（llm.json廃止）
+# LLM (OpenAI-compatible API) - config.json の llm から読む
 # -------------------------
 LLM_CFG = CFG.get("llm", {}) or {}
 
-OLLAMA_HOST = (LLM_CFG.get("host") or "http://127.0.0.1:11434").strip()
-OLLAMA_MODEL_DEFAULT = (LLM_CFG.get("model_default") or "gemma3:12b").strip()
-OLLAMA_TIMEOUT = float(LLM_CFG.get("timeout") or 120.0)
-OLLAMA_TEMPERATURE = float(LLM_CFG.get("temperature") or 0.0)
-OLLAMA_TOP_P = float(LLM_CFG.get("top_p") or 0.9)
+LLM_SERVER = str(LLM_CFG.get("server") or "").strip()
+LLM_PORT = int(LLM_CFG.get("port") or 11434)
+LLM_USE_HTTPS = bool(LLM_CFG.get("use_https", False))
+if LLM_SERVER:
+    LLM_BASE_URL = build_openai_base_url(LLM_SERVER, LLM_PORT, use_https=LLM_USE_HTTPS)
+else:
+    # 旧設定からの移行期間だけ base_url / host も読み取る。
+    LLM_BASE_URL = str(LLM_CFG.get("base_url") or LLM_CFG.get("host") or "http://127.0.0.1:11434/v1").strip()
+LLM_API_KEY = str(LLM_CFG.get("api_key") or "").strip()
+LLM_API_KEY_ENV = str(LLM_CFG.get("api_key_env") or "").strip()
+if not LLM_API_KEY and LLM_API_KEY_ENV:
+    LLM_API_KEY = os.environ.get(LLM_API_KEY_ENV, "").strip()
+LLM_MODEL_DEFAULT = (LLM_CFG.get("model_default") or "local-model").strip()
+LLM_TIMEOUT = float(LLM_CFG.get("timeout") or 120.0)
+LLM_TEMPERATURE = float(LLM_CFG.get("temperature") or 0.0)
+LLM_TOP_P = float(LLM_CFG.get("top_p") or 0.9)
 
 LLM_PROMPTS: Dict[str, Dict[str, Any]] = LLM_CFG.get("prompts", {})  # ★ dictのまま
 LLM_DEFAULT_PROMPT_ID = (LLM_CFG.get("default_prompt_id") or "soap_v1").strip()
@@ -556,47 +567,19 @@ def _session_from_jsonl_name(path: Path) -> Dict[str, str]:
         return {"patient_id": CURRENT.get("patient_id") or "unknown", "stamp": CURRENT.get("session_stamp") or ""}
     return {"patient_id": m.group("pid"), "stamp": m.group("stamp")}
 
-def ollama_generate_text(*, host: str, model: str, prompt: str,
-                         timeout_sec: float, temperature: float, top_p: float) -> Dict[str, Any]:
-    url = host.rstrip("/") + "/api/generate"
-    payload = {
-        "model": model,
-        "prompt": prompt,
-        "stream": False,
-        "think": False,  # ★まずOFF
-        "options": {"temperature": temperature, "top_p": top_p},
-    }
-
-    with httpx.Client(timeout=timeout_sec) as client:
-        r = client.post(url, json=payload)
-        body_len = len(r.content or b"")
-        log(f"[LLM] status={r.status_code} body_bytes={body_len}")
-        r.raise_for_status()
-        j = r.json()
-
-    # ★ここが肝
-    resp_len = len((j.get("response") or ""))
-    think_len = len((j.get("thinking") or ""))
-    ctx_len = len((j.get("context") or []))
-    log(f"[LLM] keys={list(j.keys())} response_len={resp_len} thinking_len={think_len} context_len={ctx_len}")
-
-    # 返す前に捨てる（安全）
-    j.pop("context", None)
-    j.pop("thinking", None)
-    return j
-
-def list_ollama_models(host: str, *, timeout_sec: float) -> List[str]:
-    url = host.rstrip("/") + "/api/tags"
-    with httpx.Client(timeout=timeout_sec) as client:
-        r = client.get(url)
-        r.raise_for_status()
-        j = r.json()
-    out = []
-    for m in j.get("models", []) or []:
-        name = m.get("name") or m.get("model")
-        if name:
-            out.append(str(name))
-    return out
+def generate_llm_text(*, model: str, prompt: str, timeout_sec: float,
+                      temperature: float, top_p: float) -> str:
+    text, payload = openai_chat_text(
+        base_url=LLM_BASE_URL,
+        api_key=LLM_API_KEY,
+        model=model,
+        prompt=prompt,
+        timeout_sec=timeout_sec,
+        temperature=temperature,
+        top_p=top_p,
+    )
+    log(f"[LLM] id={payload.get('id', '')} model={payload.get('model', model)} response_len={len(text)}")
+    return text
 
 def list_prompt_items_from_cfg() -> Dict[str, Any]:
     """
@@ -799,7 +782,7 @@ def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str = "switch") -> i
 
 async def _auto_llm_worker():
     """
-    1ワーカーで逐次処理（Ollama詰まり防止）
+    1ワーカーで逐次処理（LLM APIの同時実行を防止）
     """
     global _auto_llm_q
     if _auto_llm_q is None:
@@ -856,23 +839,21 @@ async def _run_auto_llm_job(job: dict):
     # prompt生成（既存：build_prompt_from_cfg）:contentReference[oaicite:5]{index=5}
     prompt = build_prompt_from_cfg(prompt_id, asr_text)
 
-    # Ollama呼び出し（既存：ollama_generate_text）:contentReference[oaicite:6]{index=6}
-    # httpx.Client()の同期処理なので event loop を塞がないよう to_thread に逃がす
+    # 同期HTTP処理なので event loop を塞がないよう to_thread に逃がす
     def _call():
-        return ollama_generate_text(
-            host=OLLAMA_HOST,
+        return generate_llm_text(
             model=model_id,
             prompt=prompt,
-            timeout_sec=OLLAMA_TIMEOUT,
-            temperature=OLLAMA_TEMPERATURE,
-            top_p=OLLAMA_TOP_P,
+            timeout_sec=LLM_TIMEOUT,
+            temperature=LLM_TEMPERATURE,
+            top_p=LLM_TOP_P,
         )
 
     t0 = time.time()
     log(f"[AUTO_LLM] start jsonl={jsonl_path.name} model={model_id} prompt={prompt_id} asr_correct={asr_correct}")
 
-    resp = await asyncio.to_thread(_call)
-    summary = strip_thinking_from_response(resp.get("response") or "")
+    response_text = await asyncio.to_thread(_call)
+    summary = strip_thinking_from_response(response_text)
     summary = summary.strip()
 
     dt = time.time() - t0
@@ -1360,7 +1341,7 @@ app = FastAPI()
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 so_labeler_app.state.default_data_dir = str(OUTPUTS_DIR.parent)
-so_labeler_app.state.default_llm_mode = "ollama"
+so_labeler_app.state.default_llm_mode = "openai"
 _so_labeler_prompts = LLM_CFG.get("so_labeler_prompts") or {}
 if not isinstance(_so_labeler_prompts, dict):
     _so_labeler_prompts = {}
@@ -1379,11 +1360,12 @@ for _pid, _cfg in _so_labeler_prompts.items():
     _so_labeler_prompt_templates[_pid] = _template
 _so_labeler_prompt_items.sort(key=lambda x: x["id"])
 so_labeler_app.state.llm_config = {
-    "base_url": OLLAMA_HOST,
-    "model": OLLAMA_MODEL_DEFAULT,
-    "timeout_sec": int(OLLAMA_TIMEOUT),
-    "temperature": float(OLLAMA_TEMPERATURE),
-    "top_p": float(OLLAMA_TOP_P),
+    "base_url": LLM_BASE_URL,
+    "api_key": LLM_API_KEY,
+    "model": LLM_MODEL_DEFAULT,
+    "timeout_sec": int(LLM_TIMEOUT),
+    "temperature": float(LLM_TEMPERATURE),
+    "top_p": float(LLM_TOP_P),
 }
 so_labeler_app.state.so_labeler_prompt_items = _so_labeler_prompt_items
 so_labeler_app.state.so_labeler_prompt_templates = _so_labeler_prompt_templates
@@ -1394,11 +1376,12 @@ so_labeler_app.state.default_prompt_id = (
 correction_tool_app.state.default_data_dir = str(OUTPUTS_DIR.parent)
 correction_tool_app.state.correction_rules_path = str(CORRECTION_RULES_PATH)
 correction_tool_app.state.llm_config = {
-    "base_url": OLLAMA_HOST,
-    "model": OLLAMA_MODEL_DEFAULT,
-    "timeout_sec": int(OLLAMA_TIMEOUT),
-    "temperature": float(OLLAMA_TEMPERATURE),
-    "top_p": float(OLLAMA_TOP_P),
+    "base_url": LLM_BASE_URL,
+    "api_key": LLM_API_KEY,
+    "model": LLM_MODEL_DEFAULT,
+    "timeout_sec": int(LLM_TIMEOUT),
+    "temperature": float(LLM_TEMPERATURE),
+    "top_p": float(LLM_TOP_P),
 }
 _correction_prompt_items = [{"id": "correction_v1", "label": "誤変換補正候補 v1"}]
 _correction_prompt_templates = {
@@ -1678,10 +1661,16 @@ async def api_patient_info(pid: str):
 @app.get("/api/llm/models")
 async def api_llm_models():
     try:
-        models = list_ollama_models(OLLAMA_HOST, timeout_sec=OLLAMA_TIMEOUT)
-        return {"ok": True, "models": models, "default_model": OLLAMA_MODEL_DEFAULT}
+        models = list_openai_models(LLM_BASE_URL, api_key=LLM_API_KEY, timeout_sec=LLM_TIMEOUT)
+        if LLM_MODEL_DEFAULT and LLM_MODEL_DEFAULT not in models:
+            models.insert(0, LLM_MODEL_DEFAULT)
+        return {"ok": True, "models": models, "default_model": LLM_MODEL_DEFAULT}
     except Exception as e:
-        return JSONResponse({"ok": False, "error": str(e), "models": [], "default_model": OLLAMA_MODEL_DEFAULT}, status_code=500)
+        fallback_models = [LLM_MODEL_DEFAULT] if LLM_MODEL_DEFAULT else []
+        return JSONResponse(
+            {"ok": False, "error": str(e), "models": fallback_models, "default_model": LLM_MODEL_DEFAULT},
+            status_code=502,
+        )
 
 @app.get("/api/llm/prompts")
 async def api_llm_prompts():
@@ -1840,9 +1829,9 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
     min_quality = (payload.get("min_quality") or "good").strip()
     prompt_id = (payload.get("prompt_id") or LLM_DEFAULT_PROMPT_ID or "soap_v1").strip()
 
-    model = (payload.get("model") or "").strip() or OLLAMA_MODEL_DEFAULT
-    temperature = float(payload.get("temperature") or OLLAMA_TEMPERATURE)
-    top_p = float(payload.get("top_p") or OLLAMA_TOP_P)
+    model = (payload.get("model") or "").strip() or LLM_MODEL_DEFAULT
+    temperature = float(payload.get("temperature") or LLM_TEMPERATURE)
+    top_p = float(payload.get("top_p") or LLM_TOP_P)
 
     max_lines = payload.get("max_lines")
     try:
@@ -1882,15 +1871,14 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
 
     t0 = time.time()
     try:
-        raw = ollama_generate_text(
-            host=OLLAMA_HOST,
+        response_text = generate_llm_text(
             model=model,
             prompt=prompt,
-            timeout_sec=OLLAMA_TIMEOUT,
+            timeout_sec=LLM_TIMEOUT,
             temperature=temperature,
             top_p=top_p,
         )
-        summary = (raw.get("response") or "")
+        summary = response_text
         summary = strip_thinking_from_response(summary)
         summary = summary.strip()
         elapsed = round(time.time() - t0, 3)
