@@ -452,7 +452,7 @@ class LauncherApp:
         parent.rowconfigure(6, weight=1)
 
         row = 0
-        self._add_entry(parent, "llm_server", "LLMサーバー", ("llm", "server"), kind="str", row=row, width=32)
+        self._add_entry(parent, "llm_server", "LLMサーバー (IP/ホスト名)", ("llm", "server"), kind="str", row=row, width=32)
         self._add_entry(parent, "llm_port", "Port", ("llm", "port"), kind="int", row=row, col=2, width=12)
         row += 1
         self._add_bool(parent, "llm_use_https", "HTTPS", ("llm", "use_https"), row=row)
@@ -806,6 +806,14 @@ class LauncherApp:
             if isinstance(llm_cfg, dict):
                 llm_cfg.pop("host", None)
                 llm_cfg.pop("base_url", None)
+                llm_server = str(llm_cfg.get("server") or "").strip()
+                llm_port = int(llm_cfg.get("port") or 0)
+                if not llm_server:
+                    raise ValueError("llm.server は必須です。")
+                if "://" in llm_server or "/" in llm_server:
+                    raise ValueError("llm.server にはURLではなくIPアドレスまたはホスト名だけを入力してください。")
+                if not 1 <= llm_port <= 65535:
+                    raise ValueError("llm.port は1～65535で指定してください。")
 
             if not get_nested(cfg, ("asr", "model_id"), "").strip():
                 raise ValueError("asr.model_id が空です。")

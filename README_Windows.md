@@ -214,6 +214,11 @@ release\
 `config.json.sample` を基に作成されるため、更新版を上書き展開しても利用者の設定を
 不用意に置き換えない構成になっています。
 
+LLM設定はWindows GUIの「LLM」タブで、サーバー（IP/ホスト名）、
+Port、HTTPS、モデル名、API Keyを個別に指定できます。Ollamaの標準例は
+`127.0.0.1` / `11434` / HTTPSオフです。旧`base_url`設定はGUIで読み込み、保存時に
+新しい`server`・`port`形式へ移行します。
+
 ## ビルド時の注意
 
 - ビルド開始時に、指定した `DistDir` と `BuildDir` は削除されます。
