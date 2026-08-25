@@ -30,6 +30,22 @@ def build_qwen_server_command(
     ]
 
 
+def build_vibevoice_server_command(
+    python_executable: Path, server_script: Path, config_path: Path, model_alias: str
+) -> list[str]:
+    """Build the VibeVoiceASR Python server command without changing its config."""
+    if not model_alias.strip():
+        raise ValueError("VibeVoice model alias is required")
+    return [
+        str(python_executable),
+        str(server_script),
+        "--config",
+        str(config_path),
+        "--model",
+        model_alias.strip(),
+    ]
+
+
 @dataclass(frozen=True)
 class QwenReadyStatus:
     reachable: bool
@@ -37,6 +53,9 @@ class QwenReadyStatus:
     http_status: int | None
     payload: dict[str, Any]
     error: str | None = None
+
+
+ASRReadyStatus = QwenReadyStatus
 
 
 def fetch_qwen_ready_status(base_url: str, timeout_sec: float = 1.5) -> QwenReadyStatus:
@@ -70,6 +89,11 @@ def fetch_qwen_ready_status(base_url: str, timeout_sec: float = 1.5) -> QwenRead
         else:
             error = str(payload.get("status") or f"HTTP {http_status}")
     return QwenReadyStatus(True, ready, http_status, payload, error)
+
+
+def fetch_asr_ready_status(base_url: str, timeout_sec: float = 1.5) -> ASRReadyStatus:
+    """Provider-neutral name for the shared schema-v1 /ready contract."""
+    return fetch_qwen_ready_status(base_url, timeout_sec)
 
 
 def qwen_api_is_ready(base_url: str, timeout_sec: float = 1.5) -> bool:

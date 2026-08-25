@@ -16,7 +16,8 @@ from app_version import APP_VERSION
 from launcher_helpers import (
     QwenReadyStatus,
     build_qwen_server_command,
-    fetch_qwen_ready_status,
+    build_vibevoice_server_command,
+    fetch_asr_ready_status,
     resolve_launcher_path,
 )
 
@@ -50,6 +51,18 @@ FIELD_DEFAULTS = {
     "qwen_executable": "../QwenASR/dist/QwenASR-Server/QwenASR-Server.exe",
     "qwen_config": "../QwenASR/dist/QwenASR-Server/config.json",
     "qwen_startup_timeout": 90,
+    "vibevoice_base_url": "http://127.0.0.1:8020",
+    "vibevoice_timeout": 135,
+    "vibevoice_language": "Japanese",
+    "vibevoice_context": "",
+    "vibevoice_hotwords": "",
+    "vibevoice_include_segments": True,
+    "vibevoice_managed": False,
+    "vibevoice_model_alias": "7b",
+    "vibevoice_python": "../VibeVoiceASR/.venv/Scripts/python.exe",
+    "vibevoice_server_script": "../VibeVoiceASR/server.py",
+    "vibevoice_config": "../VibeVoiceASR/config.json",
+    "vibevoice_startup_timeout": 180,
 }
 
 
@@ -279,7 +292,7 @@ class LauncherApp:
         row = 0
         provider_box = self._add_choice(
             parent, "asr_provider", "ASR Provider", ("asr", "provider"),
-            ["whisper", "qwen3-asr"], row=row,
+            ["whisper", "qwen3-asr", "vibevoice-asr"], row=row,
         )
         row += 1
 
@@ -387,7 +400,54 @@ class LauncherApp:
         ).grid(row=qwen_row + 1, column=0, columnspan=4, sticky="w", pady=(0, 6))
         row += 1
 
-        vad_box = ttk.LabelFrame(parent, text="VAD（Whisper / Qwen3-ASR 共通）", padding=10)
+        vibevoice_box = ttk.LabelFrame(parent, text="VibeVoice-ASR API", padding=10)
+        vibevoice_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
+        self.vibevoice_settings_box = vibevoice_box
+        for i in range(4):
+            vibevoice_box.columnconfigure(i, weight=1)
+        vibe_row = 0
+        self._add_entry(vibevoice_box, "vibevoice_base_url", "API URL", ("asr", "vibevoice", "base_url"), kind="str", row=vibe_row, width=36)
+        vibe_row += 1
+        self._add_entry(vibevoice_box, "vibevoice_timeout", "認識Timeout秒", ("asr", "vibevoice", "timeout_sec"), kind="float", row=vibe_row, width=12)
+        self._add_entry(vibevoice_box, "vibevoice_language", "言語", ("asr", "vibevoice", "language"), kind="str", row=vibe_row, col=2, width=12)
+        vibe_row += 1
+        self._add_text(vibevoice_box, "vibevoice_context", "Context", ("asr", "vibevoice", "context"), row=vibe_row, height=4)
+        vibe_row += 1
+        self._add_text(vibevoice_box, "vibevoice_hotwords", "Hotwords（1行1語）", ("asr", "vibevoice", "hotwords"), row=vibe_row, height=5)
+        vibe_row += 1
+        self._add_bool(vibevoice_box, "vibevoice_include_segments", "話者・timestamp情報を保存", ("asr", "vibevoice", "include_segments"), row=vibe_row)
+        vibe_row += 1
+
+        vibe_status_box = ttk.LabelFrame(vibevoice_box, text="API稼働状況", padding=8)
+        vibe_status_box.grid(row=vibe_row, column=0, columnspan=4, sticky="nsew", pady=(6, 10))
+        vibe_status_box.columnconfigure(1, weight=1)
+        self.vibevoice_status_indicator = tk.Canvas(vibe_status_box, width=18, height=18, highlightthickness=0, borderwidth=0)
+        self.vibevoice_status_indicator.grid(row=0, column=0, sticky="w", padx=(0, 8))
+        self.vibevoice_status_indicator_oval = self.vibevoice_status_indicator.create_oval(2, 2, 16, 16, outline="", fill="#9ca3af")
+        self.vibevoice_status_var = tk.StringVar(value="未確認")
+        ttk.Label(vibe_status_box, textvariable=self.vibevoice_status_var, font=("", 10, "bold")).grid(row=0, column=1, sticky="w")
+        ttk.Button(vibe_status_box, text="更新", command=self.refresh_qwen_status, width=8).grid(row=0, column=2, sticky="e", padx=(8, 0))
+        self.btn_vibevoice_restart = ttk.Button(vibe_status_box, text="VibeVoice再起動", command=self.restart_managed_qwen, width=16)
+        self.btn_vibevoice_restart.grid(row=0, column=3, sticky="e", padx=(8, 0))
+        self.vibevoice_status_details_var = tk.StringVar(value="/ready の応答を確認します。")
+        ttk.Label(vibe_status_box, textvariable=self.vibevoice_status_details_var, wraplength=780, justify="left").grid(row=1, column=0, columnspan=4, sticky="w", pady=(6, 0))
+        vibe_row += 1
+
+        self._add_bool(vibevoice_box, "vibevoice_managed", "Windows GUIランチャーでVibeVoiceASRを起動・停止", ("asr", "vibevoice", "managed_by_launcher"), row=vibe_row)
+        vibe_row += 1
+        self._add_entry(vibevoice_box, "vibevoice_model_alias", "起動モデルalias", ("asr", "vibevoice", "model_alias"), kind="str", row=vibe_row, width=16)
+        vibe_row += 1
+        self._add_path_entry(vibevoice_box, "vibevoice_python", "VibeVoice Python", ("asr", "vibevoice", "python_executable"), row=vibe_row, select="file")
+        vibe_row += 1
+        self._add_path_entry(vibevoice_box, "vibevoice_server_script", "VibeVoice server.py", ("asr", "vibevoice", "server_script"), row=vibe_row, select="file")
+        vibe_row += 1
+        self._add_path_entry(vibevoice_box, "vibevoice_config", "VibeVoice config.json", ("asr", "vibevoice", "config_path"), row=vibe_row, select="file")
+        vibe_row += 1
+        self._add_entry(vibevoice_box, "vibevoice_startup_timeout", "起動タイムアウト秒", ("asr", "vibevoice", "startup_timeout_sec"), kind="float", row=vibe_row, width=12)
+        ttk.Label(vibevoice_box, text="VibeVoice用の仮想環境を指定し、モデル読込後に /ready になるまで待ちます。", wraplength=780).grid(row=vibe_row + 1, column=0, columnspan=4, sticky="w", pady=(0, 6))
+        row += 1
+
+        vad_box = ttk.LabelFrame(parent, text="VAD（全ASR provider共通）", padding=10)
         vad_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))
         for i in range(4):
             vad_box.columnconfigure(i, weight=1)
@@ -599,6 +659,7 @@ class LauncherApp:
         if hasattr(self, "whisper_settings_box"):
             self._set_widget_tree_enabled(self.whisper_settings_box, True)
             self._set_widget_tree_enabled(self.qwen_settings_box, True)
+            self._set_widget_tree_enabled(self.vibevoice_settings_box, True)
         self.cfg = load_config()
         for name, field in self.field_meta.items():
             path = field["path"]
@@ -611,9 +672,11 @@ class LauncherApp:
                 value = base.get(key, False if kind == "bool" else "")
             else:
                 fallback = FIELD_DEFAULTS.get(name, False if kind == "bool" else "")
-                if name == "qwen_context":
+                if name in {"qwen_context", "vibevoice_context"}:
                     fallback = get_nested(self.cfg, ("asr", "initial_prompt"), fallback)
                 value = get_nested(self.cfg, path, fallback)
+                if name == "vibevoice_hotwords" and isinstance(value, list):
+                    value = "\n".join(str(word) for word in value)
                 if name in {"llm_server", "llm_port", "llm_use_https"} and value in (None, "", False):
                     old_url = str(
                         get_nested(self.cfg, ("llm", "base_url"), "")
@@ -689,71 +752,83 @@ class LauncherApp:
     def _update_asr_provider_ui(self) -> None:
         provider = self.vars["asr_provider"].get().strip().lower()
         qwen_selected = provider in {"qwen", "qwen3-asr"}
-        self._set_widget_tree_enabled(self.whisper_settings_box, not qwen_selected)
+        vibevoice_selected = provider in {"vibevoice", "vibevoice-asr"}
+        self._set_widget_tree_enabled(self.whisper_settings_box, not qwen_selected and not vibevoice_selected)
         self._set_widget_tree_enabled(self.qwen_settings_box, qwen_selected)
+        self._set_widget_tree_enabled(self.vibevoice_settings_box, vibevoice_selected)
 
     def _on_asr_provider_changed(self, _event=None) -> None:
         self._update_asr_provider_ui()
         provider = self.vars["asr_provider"].get().strip().lower()
-        if provider in {"qwen", "qwen3-asr"}:
+        if provider != "whisper":
             self.refresh_qwen_status()
 
     def refresh_qwen_status(self) -> None:
         if self._qwen_status_checking:
             return
-        base_url = self.vars["qwen_base_url"].get().strip()
+        provider = self.vars["asr_provider"].get().strip().lower()
+        vibevoice = provider in {"vibevoice", "vibevoice-asr"}
+        base_url = self.vars["vibevoice_base_url" if vibevoice else "qwen_base_url"].get().strip()
         if not base_url:
-            self._apply_qwen_status(QwenReadyStatus(False, False, None, {}, "API URLが空です。"))
+            self._apply_qwen_status(QwenReadyStatus(False, False, None, {}, "API URLが空です。"), vibevoice)
             return
 
         self._qwen_status_checking = True
-        self.qwen_status_var.set("確認中...")
-        self.qwen_status_indicator.itemconfigure(self.qwen_status_indicator_oval, fill="#eab308")
+        status_var = self.vibevoice_status_var if vibevoice else self.qwen_status_var
+        indicator = self.vibevoice_status_indicator if vibevoice else self.qwen_status_indicator
+        indicator_oval = self.vibevoice_status_indicator_oval if vibevoice else self.qwen_status_indicator_oval
+        status_var.set("確認中...")
+        indicator.itemconfigure(indicator_oval, fill="#eab308")
         threading.Thread(
-            target=self._fetch_qwen_status, args=(base_url,), daemon=True
+            target=self._fetch_qwen_status, args=(base_url, vibevoice), daemon=True
         ).start()
 
-    def _fetch_qwen_status(self, base_url: str) -> None:
-        status = fetch_qwen_ready_status(base_url)
-        self.action_queue.put(("qwen_status", status))
+    def _fetch_qwen_status(self, base_url: str, vibevoice: bool = False) -> None:
+        status = fetch_asr_ready_status(base_url)
+        self.action_queue.put(("qwen_status", (status, vibevoice)))
 
     def _periodic_qwen_status_refresh(self) -> None:
         provider = self.vars["asr_provider"].get().strip().lower()
-        if provider in {"qwen", "qwen3-asr"}:
+        if provider != "whisper":
             self.refresh_qwen_status()
         self.root.after(5000, self._periodic_qwen_status_refresh)
 
-    def _apply_qwen_status(self, status: QwenReadyStatus) -> None:
+    def _apply_qwen_status(self, status: QwenReadyStatus, vibevoice: bool = False) -> None:
         self._qwen_status_checking = False
+        status_var = self.vibevoice_status_var if vibevoice else self.qwen_status_var
+        details_var = self.vibevoice_status_details_var if vibevoice else self.qwen_status_details_var
+        indicator = self.vibevoice_status_indicator if vibevoice else self.qwen_status_indicator
+        indicator_oval = self.vibevoice_status_indicator_oval if vibevoice else self.qwen_status_indicator_oval
         payload = status.payload
         if status.ready:
             model = str(payload.get("model") or "-")
             device = str(payload.get("device") or "-")
             queue_depth = payload.get("queue_depth", "-")
             queue_capacity = payload.get("queue_capacity", "-")
-            self.qwen_status_var.set(
+            status_var.set(
                 f"Ready / model {model} / {device} / queue {queue_depth}/{queue_capacity}"
             )
-            self.qwen_status_indicator.itemconfigure(
-                self.qwen_status_indicator_oval, fill="#16a34a"
-            )
+            indicator.itemconfigure(indicator_oval, fill="#16a34a")
             details = [
                 f"model_id: {payload.get('model_id') or '-'}",
                 f"engine: {payload.get('engine') or '-'} / {payload.get('backend') or '-'}",
                 f"app: {payload.get('app_version') or '-'} / schema: {payload.get('schema_version') or '-'}",
             ]
-            self.qwen_status_details_var.set("   ".join(details))
+            language = self.vars["vibevoice_language"].get().strip().lower() if vibevoice else ""
+            if vibevoice and str(payload.get("backend") or "").lower() == "vibeasr-cpp" and language in {"ja", "japanese", "日本語"}:
+                details.append("警告: BitNetの明示対応言語に日本語は含まれません。Transformers版を使用してください。")
+            details_var.set("   ".join(details))
             return
 
         if status.reachable:
             http_text = f"HTTP {status.http_status}" if status.http_status is not None else "応答あり"
-            self.qwen_status_var.set(f"未準備 / {http_text}")
+            status_var.set(f"未準備 / {http_text}")
             color = "#eab308"
         else:
-            self.qwen_status_var.set("接続不可")
+            status_var.set("接続不可")
             color = "#dc2626"
-        self.qwen_status_indicator.itemconfigure(self.qwen_status_indicator_oval, fill=color)
-        self.qwen_status_details_var.set(status.error or "Ready応答を取得できませんでした。")
+        indicator.itemconfigure(indicator_oval, fill=color)
+        details_var.set(status.error or "Ready応答を取得できませんでした。")
 
     def save_form(self) -> bool:
         cfg = load_config()
@@ -891,8 +966,9 @@ class LauncherApp:
 
         self._cancel_start.clear()
         provider = str(get_nested(self.cfg, ("asr", "provider"), "whisper")).strip().lower()
-        managed = bool(get_nested(self.cfg, ("asr", "qwen", "managed_by_launcher"), False))
-        if provider not in {"qwen", "qwen3-asr"} or not managed:
+        provider_key = "vibevoice" if provider in {"vibevoice", "vibevoice-asr"} else "qwen"
+        managed = bool(get_nested(self.cfg, ("asr", provider_key, "managed_by_launcher"), False))
+        if provider == "whisper" or not managed:
             self._start_speechsummarizer_process()
             return
 
@@ -901,43 +977,57 @@ class LauncherApp:
         threading.Thread(target=self._start_managed_qwen_then_server, daemon=True).start()
 
     def _start_managed_qwen_then_server(self, start_speechsummarizer: bool = True) -> None:
-        qwen_cfg = get_nested(self.cfg, ("asr", "qwen"), {}) or {}
-        base_url = str(qwen_cfg.get("base_url", "http://127.0.0.1:8010")).rstrip("/")
+        provider = str(get_nested(self.cfg, ("asr", "provider"), "qwen3-asr")).strip().lower()
+        is_vibevoice = provider in {"vibevoice", "vibevoice-asr"}
+        provider_key = "vibevoice" if is_vibevoice else "qwen"
+        provider_label = "VibeVoiceASR" if is_vibevoice else "QwenASR"
+        remote_cfg = get_nested(self.cfg, ("asr", provider_key), {}) or {}
+        default_url = "http://127.0.0.1:8020" if is_vibevoice else "http://127.0.0.1:8010"
+        base_url = str(remote_cfg.get("base_url", default_url)).rstrip("/")
         try:
-            model_alias = str(qwen_cfg.get("model_alias", "1.7b")).strip().lower()
-            if model_alias not in {"0.6b", "1.7b"}:
+            model_alias = str(remote_cfg.get("model_alias", "7b" if is_vibevoice else "1.7b")).strip().lower()
+            if not is_vibevoice and model_alias not in {"0.6b", "1.7b"}:
                 raise ValueError("Qwen model_alias must be 0.6b or 1.7b")
+            if not model_alias:
+                raise ValueError("VibeVoice model_alias must not be empty")
 
-            ready_status = fetch_qwen_ready_status(base_url)
+            ready_status = fetch_asr_ready_status(base_url)
             if ready_status.ready:
                 running_model = str(ready_status.payload.get("model") or "").strip().lower()
                 if running_model != model_alias:
                     raise RuntimeError(
-                        f"QwenASR is already running with model {running_model or 'unknown'}; "
+                        f"{provider_label} is already running with model {running_model or 'unknown'}; "
                         f"selected model is {model_alias}. Stop that process before starting."
                     )
-                self.log_queue.put("[launcher] QwenASR is already ready; using external process")
+                self.log_queue.put(f"[launcher] {provider_label} is already ready; using external process")
                 action = "start_speechsummarizer" if start_speechsummarizer else "qwen_restart_complete"
                 self.action_queue.put((action, None))
                 return
 
-            executable_path = resolve_launcher_path(str(qwen_cfg.get("executable_path", "")), APP_DIR)
-            config_path = resolve_launcher_path(str(qwen_cfg.get("config_path", "")), APP_DIR)
-            timeout_sec = float(qwen_cfg.get("startup_timeout_sec", 90.0))
+            config_path = resolve_launcher_path(str(remote_cfg.get("config_path", "")), APP_DIR)
+            timeout_sec = float(remote_cfg.get("startup_timeout_sec", 180.0 if is_vibevoice else 90.0))
             if timeout_sec <= 0:
-                raise ValueError("Qwen startup_timeout_sec must be greater than zero")
-            for label, path in (
-                ("QwenASR-Server.exe", executable_path),
-                ("Qwen config.json", config_path),
-            ):
+                raise ValueError(f"{provider_label} startup_timeout_sec must be greater than zero")
+            required_paths = [(f"{provider_label} config.json", config_path)]
+            if is_vibevoice:
+                python_path = resolve_launcher_path(str(remote_cfg.get("python_executable", "")), APP_DIR)
+                server_script = resolve_launcher_path(str(remote_cfg.get("server_script", "")), APP_DIR)
+                required_paths.extend([("VibeVoice Python", python_path), ("VibeVoice server.py", server_script)])
+                cmd = build_vibevoice_server_command(python_path, server_script, config_path, model_alias)
+                working_dir = server_script.parent
+            else:
+                executable_path = resolve_launcher_path(str(remote_cfg.get("executable_path", "")), APP_DIR)
+                required_paths.append(("QwenASR-Server.exe", executable_path))
+                cmd = build_qwen_server_command(executable_path, config_path, model_alias)
+                working_dir = executable_path.parent
+            for label, path in required_paths:
                 if not path.is_file():
                     raise FileNotFoundError(f"{label} not found: {path}")
 
-            cmd = build_qwen_server_command(executable_path, config_path, model_alias)
             popen_encoding = locale.getpreferredencoding(False) or "utf-8"
             self.qwen_proc = subprocess.Popen(
                 cmd,
-                cwd=str(executable_path.parent),
+                cwd=str(working_dir),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 text=True,
@@ -946,31 +1036,31 @@ class LauncherApp:
                 bufsize=1,
             )
             threading.Thread(
-                target=self._read_process_output, args=(self.qwen_proc, "qwen"), daemon=True
+                target=self._read_process_output, args=(self.qwen_proc, provider_key), daemon=True
             ).start()
-            self.log_queue.put(f"[launcher] QwenASR start: {' '.join(cmd)}")
+            self.log_queue.put(f"[launcher] {provider_label} start: {' '.join(cmd)}")
 
             deadline = time.monotonic() + timeout_sec
             while time.monotonic() < deadline and not self._cancel_start.is_set():
                 if self.qwen_proc.poll() is not None:
-                    raise RuntimeError(f"QwenASR exited before ready (rc={self.qwen_proc.returncode})")
-                ready_status = fetch_qwen_ready_status(base_url)
+                    raise RuntimeError(f"{provider_label} exited before ready (rc={self.qwen_proc.returncode})")
+                ready_status = fetch_asr_ready_status(base_url)
                 if self._cancel_start.is_set():
                     return
                 if ready_status.ready:
                     running_model = str(ready_status.payload.get("model") or "").strip().lower()
                     if running_model != model_alias:
                         raise RuntimeError(
-                            f"QwenASR ready model is {running_model or 'unknown'}, expected {model_alias}"
+                            f"{provider_label} ready model is {running_model or 'unknown'}, expected {model_alias}"
                         )
-                    self.log_queue.put(f"[launcher] QwenASR ready: model={model_alias}")
+                    self.log_queue.put(f"[launcher] {provider_label} ready: model={model_alias}")
                     action = "start_speechsummarizer" if start_speechsummarizer else "qwen_restart_complete"
                     self.action_queue.put((action, None))
                     return
                 self._cancel_start.wait(0.25)
             if self._cancel_start.is_set():
                 return
-            raise TimeoutError(f"QwenASR did not become ready within {timeout_sec:g} seconds")
+            raise TimeoutError(f"{provider_label} did not become ready within {timeout_sec:g} seconds")
         except Exception as exc:
             action = "managed_start_failed" if start_speechsummarizer else "qwen_restart_failed"
             self.action_queue.put((action, str(exc)))
@@ -981,14 +1071,17 @@ class LauncherApp:
         if not self.save_form():
             return
         provider = str(get_nested(self.cfg, ("asr", "provider"), "whisper")).strip().lower()
-        managed = bool(get_nested(self.cfg, ("asr", "qwen", "managed_by_launcher"), False))
-        if provider not in {"qwen", "qwen3-asr"} or not managed:
-            messagebox.showinfo("QwenASR再起動", "Qwen3-ASRのランチャー管理を有効にしてください。", parent=self.root)
+        is_vibevoice = provider in {"vibevoice", "vibevoice-asr"}
+        provider_key = "vibevoice" if is_vibevoice else "qwen"
+        provider_label = "VibeVoiceASR" if is_vibevoice else "QwenASR"
+        managed = bool(get_nested(self.cfg, ("asr", provider_key, "managed_by_launcher"), False))
+        if provider == "whisper" or not managed:
+            messagebox.showinfo(f"{provider_label}再起動", f"{provider_label}のランチャー管理を有効にしてください。", parent=self.root)
             return
         if self.qwen_proc is None or self.qwen_proc.poll() is not None:
             messagebox.showinfo(
-                "QwenASR再起動",
-                "ランチャーが起動したQwenASRだけを再起動できます。\n外部起動したプロセスは停止しません。",
+                f"{provider_label}再起動",
+                f"ランチャーが起動した{provider_label}だけを再起動できます。\n外部起動したプロセスは停止しません。",
                 parent=self.root,
             )
             return
@@ -1002,7 +1095,7 @@ class LauncherApp:
         self._terminate_process(proc)
         if self.qwen_proc is proc:
             self.qwen_proc = None
-        self.log_queue.put("[launcher] managed QwenASR stopped for restart")
+        self.log_queue.put("[launcher] managed ASR API stopped for restart")
         if self._cancel_start.is_set():
             return
         self._start_managed_qwen_then_server(start_speechsummarizer=False)
@@ -1011,18 +1104,18 @@ class LauncherApp:
         self._qwen_restarting = False
         if error:
             self._stop_owned_qwen()
-            self._append_log(f"[launcher] QwenASR restart failed: {error}")
-            messagebox.showerror("QwenASR再起動エラー", error, parent=self.root)
+            self._append_log(f"[launcher] ASR API restart failed: {error}")
+            messagebox.showerror("ASR API再起動エラー", error, parent=self.root)
         else:
-            self._append_log("[launcher] QwenASR restart complete")
+            self._append_log("[launcher] ASR API restart complete")
             self.refresh_qwen_status()
         self._update_status()
 
     def _managed_start_failed(self, error: str) -> None:
         self._stop_owned_qwen()
         self._starting = False
-        self._append_log(f"[launcher] QwenASR start failed: {error}")
-        messagebox.showerror("QwenASR起動エラー", error, parent=self.root)
+        self._append_log(f"[launcher] ASR API start failed: {error}")
+        messagebox.showerror("ASR API起動エラー", error, parent=self.root)
         self._update_status()
 
     def _maybe_auto_start_server(self) -> None:
@@ -1057,7 +1150,7 @@ class LauncherApp:
             return
         self._terminate_process(self.qwen_proc)
         self.qwen_proc = None
-        self._append_log("[launcher] managed QwenASR stopped")
+        self._append_log("[launcher] managed ASR API stopped")
 
     def stop_server(self) -> None:
         self._cancel_start.set()
@@ -1097,8 +1190,8 @@ class LauncherApp:
                     self._qwen_restart_finished()
                 elif action == "qwen_restart_failed":
                     self._qwen_restart_finished(str(value or "QwenASR restart failed"))
-                elif action == "qwen_status" and isinstance(value, QwenReadyStatus):
-                    self._apply_qwen_status(value)
+                elif action == "qwen_status" and isinstance(value, tuple) and isinstance(value[0], QwenReadyStatus):
+                    self._apply_qwen_status(value[0], bool(value[1]))
         except queue.Empty:
             pass
         try:
@@ -1119,14 +1212,19 @@ class LauncherApp:
     def _update_status(self) -> None:
         running = self.proc is not None and self.proc.poll() is None
         busy = self._starting or self._qwen_restarting
-        self.status_var.set("Qwen再起動中" if self._qwen_restarting else ("起動準備中" if self._starting else ("起動中" if running else "停止中")))
+        self.status_var.set("ASR再起動中" if self._qwen_restarting else ("起動準備中" if self._starting else ("起動中" if running else "停止中")))
         color = "#eab308" if busy else ("#16a34a" if running else "#9ca3af")
         self.status_indicator.itemconfigure(self.status_indicator_oval, fill=color)
         self.btn_start.configure(state="disabled" if running or busy else "normal")
         managed_running = self.qwen_proc is not None and self.qwen_proc.poll() is None
+        provider = self.vars["asr_provider"].get().strip().lower()
+        is_vibevoice = provider in {"vibevoice", "vibevoice-asr"}
         self.btn_stop.configure(state="normal" if running or managed_running or busy else "disabled")
         self.btn_qwen_restart.configure(
-            state="normal" if managed_running and not busy else "disabled"
+            state="normal" if managed_running and not busy and not is_vibevoice else "disabled"
+        )
+        self.btn_vibevoice_restart.configure(
+            state="normal" if managed_running and not busy and is_vibevoice else "disabled"
         )
 
     def _on_close(self) -> None:

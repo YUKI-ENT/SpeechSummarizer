@@ -38,6 +38,20 @@ QwenASRはWindows版の`QwenASR-Server.exe`を使用します。GUIランチャ�
 
 PythonからSpeechSummarizerの`app.py`を直接実行した場合、この自動管理は動作しません。その場合は従来どおりQwenASRを別途起動し、`config.json`でproviderとAPI URLを指定します。
 
+## VibeVoice-ASRをGUIランチャーから利用する
+
+ASRタブでproviderを`vibevoice-asr`にすると、API URL、言語、Context、Hotwords、話者・timestamp保存を設定できます。既定URLは`http://127.0.0.1:8020`です。
+
+ランチャーでVibeVoiceASRも管理する場合は、VibeVoice専用仮想環境の`python.exe`、`server.py`、VibeVoice側の`config.json`、起動モデルaliasを指定します。ランチャーは次の形式で先にAPIを起動し、`/ready`を確認してからSpeechSummarizerを起動します。
+
+```text
+python.exe server.py --config config.json --model 7b
+```
+
+VibeVoice側は依存ライブラリの版がSpeechSummarizerと異なるため、必ずVibeVoiceASR用の仮想環境を指定してください。すでに同じURL・モデルでAPIがReadyの場合は外部プロセスとして利用し、ランチャーから停止しません。
+
+日本語音声では、`/ready`の`backend`が`transformers`であることを確認してください。CPU向けBitNet版（`backend: vibeasr-cpp`）の明示対応言語に日本語は含まれません。
+
 ## 初回のみ行う準備
 
 PowerShellでリポジトリのルートに移動します。

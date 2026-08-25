@@ -8,6 +8,7 @@ import httpx
 from asr_providers import (
     ASRProviderError,
     Qwen3ASRProvider,
+    VibeVoiceASRProvider,
     WhisperASRProvider,
     asr_model_label,
     create_asr_provider,
@@ -136,6 +137,74 @@ class QwenProviderTests(unittest.IsolatedAsyncioTestCase):
     def test_provider_model_display_label(self):
         self.assertEqual(asr_model_label("qwen3-asr", "1.7b"), "qwen3-asr:1.7b")
         self.assertEqual(asr_model_label("whisper", "large-v3"), "whisper:large-v3")
+
+
+class VibeVoiceProviderTests(unittest.IsolatedAsyncioTestCase):
+    async def test_vibevoice_extensions_are_sent_and_returned(self):
+        requests = []
+
+        async def handler(request):
+            body = await request.aread()
+            requests.append((request, body))
+            if request.url.path == "/ready":
+                return httpx.Response(200, json={
+                    "schema_version": 1,
+                    "status": "ready",
+                    "engine": "vibevoice-asr",
+                    "model": "7b",
+                })
+            return httpx.Response(200, json={
+                "schema_version": 1,
+                "request_id": "vibe-request-id",
+                "text": "今日はどうされましたか。",
+                "language": "Japanese",
+                "engine": "vibevoice-asr",
+                "backend": "transformers",
+                "model": "7b",
+                "model_id": "microsoft/VibeVoice-ASR",
+                "segments": [{
+                    "speaker": "Speaker 0", "start_sec": 0.1, "end_sec": 1.2,
+                    "text": "今日はどうされましたか。",
+                }],
+                "timing": {"inference_sec": 0.8},
+                "provider_metrics": {},
+            })
+
+        async with httpx.AsyncClient(
+            transport=httpx.MockTransport(handler), base_url="http://127.0.0.1:8020"
+        ) as client:
+            provider = VibeVoiceASRProvider("http://127.0.0.1:8020", client=client)
+            with tempfile.TemporaryDirectory() as tmp_dir:
+                wav_path = Path(tmp_dir) / "input.wav"
+                wav_path.write_bytes(b"RIFFfake-wave")
+                result = await provider.transcribe(wav_path, {
+                    "language": "Japanese",
+                    "context": "耳鼻咽喉科の診察会話",
+                    "hotwords": ["滲出性中耳炎", "鼓膜切開"],
+                    "include_segments": True,
+                })
+
+        self.assertEqual(result.provider, "vibevoice-asr")
+        self.assertEqual(result.backend, "transformers")
+        self.assertEqual(result.model_id, "microsoft/VibeVoice-ASR")
+        self.assertEqual(result.segments[0]["speaker"], "Speaker 0")
+        body = requests[-1][1]
+        self.assertIn(b'name="hotwords"', body)
+        self.assertIn("滲出性中耳炎".encode(), body)
+        self.assertIn(b'name="include_segments"', body)
+        self.assertIn(b"true", body)
+
+    def test_factory_accepts_local_vibevoice_and_rejects_remote_url(self):
+        provider = create_asr_provider(
+            {"provider": "vibevoice-asr", "vibevoice": {"base_url": "http://localhost:8020"}},
+            lambda _path: None,
+        )
+        self.assertIsInstance(provider, VibeVoiceASRProvider)
+        with self.assertRaises(ValueError):
+            create_asr_provider(
+                {"provider": "vibevoice-asr", "vibevoice": {"base_url": "http://example.com:8020"}},
+                lambda _path: None,
+            )
 
 
 if __name__ == "__main__":

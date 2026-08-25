@@ -8,6 +8,7 @@ from unittest.mock import patch
 
 from launcher_helpers import (
     build_qwen_server_command,
+    build_vibevoice_server_command,
     fetch_qwen_ready_status,
     qwen_api_is_ready,
     resolve_launcher_path,
@@ -43,9 +44,9 @@ class LauncherHelperTests(unittest.TestCase):
             "0.6b",
         )
         self.assertEqual(command, [
-            "C:\\Qwen\\QwenASR-Server.exe",
+            str(Path("C:/Qwen/QwenASR-Server.exe")),
             "--config",
-            "C:\\Qwen\\config.json",
+            str(Path("C:/Qwen/config.json")),
             "--model",
             "0.6b",
         ])
@@ -53,6 +54,22 @@ class LauncherHelperTests(unittest.TestCase):
     def test_qwen_server_command_rejects_unknown_model(self):
         with self.assertRaises(ValueError):
             build_qwen_server_command(Path("server.exe"), Path("config.json"), "large")
+
+    def test_vibevoice_server_command_uses_dedicated_python_environment(self):
+        command = build_vibevoice_server_command(
+            Path("C:/VibeVoiceASR/.venv/Scripts/python.exe"),
+            Path("C:/VibeVoiceASR/server.py"),
+            Path("C:/VibeVoiceASR/config.json"),
+            "7b",
+        )
+        self.assertEqual(command, [
+            str(Path("C:/VibeVoiceASR/.venv/Scripts/python.exe")),
+            str(Path("C:/VibeVoiceASR/server.py")),
+            "--config",
+            str(Path("C:/VibeVoiceASR/config.json")),
+            "--model",
+            "7b",
+        ])
 
     @patch("launcher_helpers.urllib.request.urlopen")
     def test_qwen_ready_requires_schema_v1_ready(self, urlopen):

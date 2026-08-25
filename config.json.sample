@@ -56,6 +56,24 @@
       "startup_timeout_sec": 90
     },
 
+    "vibevoice": {
+      "base_url": "http://127.0.0.1:8020",
+      "timeout_sec": 135,
+      "language": "Japanese",
+      "context": "日本の医療現場の会話。聞こえたとおりに書き起こす。推測で補完しない。",
+      "hotwords": [
+        "滲出性中耳炎",
+        "鼓膜切開"
+      ],
+      "include_segments": true,
+      "managed_by_launcher": false,
+      "model_alias": "7b",
+      "python_executable": "../VibeVoiceASR/.venv/Scripts/python.exe",
+      "server_script": "../VibeVoiceASR/server.py",
+      "config_path": "../VibeVoiceASR/config.json",
+      "startup_timeout_sec": 180
+    },
+
     "models": {
       "small": "models/small",
       "medium": "models/models--Systran--faster-whisper-medium",

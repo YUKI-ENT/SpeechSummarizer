@@ -888,7 +888,9 @@ ASR_ENABLED = bool(ASR_CFG.get("enabled", True))
 ASR_PROVIDER_NAME = str(ASR_CFG.get("provider", "whisper")).strip().lower() or "whisper"
 if ASR_PROVIDER_NAME == "qwen":
     ASR_PROVIDER_NAME = "qwen3-asr"
-if ASR_PROVIDER_NAME not in {"whisper", "qwen3-asr"}:
+if ASR_PROVIDER_NAME == "vibevoice":
+    ASR_PROVIDER_NAME = "vibevoice-asr"
+if ASR_PROVIDER_NAME not in {"whisper", "qwen3-asr", "vibevoice-asr"}:
     raise ValueError(f"unsupported asr.provider: {ASR_PROVIDER_NAME}")
 
 ASR_LANG = ASR_CFG.get("language", "ja")
@@ -939,7 +941,7 @@ CURRENT["asr"]["language"] = ASR_LANG
 CURRENT["asr"]["temperature"] = ASR_TEMP
 CURRENT["asr"]["prompt"] = ASR_PROMPT_DEFAULT
 CURRENT["asr"]["provider"] = ASR_PROVIDER_NAME
-if ASR_PROVIDER_NAME == "qwen3-asr":
+if ASR_PROVIDER_NAME != "whisper":
     CURRENT["asr"]["model_name"] = None
     CURRENT["asr"]["model_path"] = None
     CURRENT["asr"]["model_id"] = None
@@ -952,13 +954,22 @@ def get_asr_runtime_config() -> dict:
     temp = float(a.get("temperature") if a.get("temperature") is not None else ASR_TEMP)
     prompt = a.get("prompt") if a.get("prompt") is not None else ASR_PROMPT_DEFAULT
 
-    qwen_cfg = ASR_CFG.get("qwen") or {}
+    remote_cfg = ASR_CFG.get("qwen") or {}
+    if ASR_PROVIDER_NAME == "vibevoice-asr":
+        remote_cfg = ASR_CFG.get("vibevoice") or {}
+    hotwords = remote_cfg.get("hotwords") or []
+    if isinstance(hotwords, str):
+        hotwords = [word.strip() for word in hotwords.splitlines() if word.strip()]
+    elif not isinstance(hotwords, list):
+        hotwords = []
     return {
         "provider": ASR_PROVIDER_NAME,
         "model_name": model_name,
         "model_path": model_path if ASR_PROVIDER_NAME == "whisper" else None,
-        "language": (qwen_cfg.get("language") or "Japanese") if ASR_PROVIDER_NAME == "qwen3-asr" else lang,
-        "context": (qwen_cfg.get("context") if qwen_cfg.get("context") is not None else prompt),
+        "language": (remote_cfg.get("language") or "Japanese") if ASR_PROVIDER_NAME != "whisper" else lang,
+        "context": (remote_cfg.get("context") if remote_cfg.get("context") is not None else prompt),
+        "hotwords": [str(word).strip() for word in hotwords if str(word).strip()],
+        "include_segments": bool(remote_cfg.get("include_segments", ASR_PROVIDER_NAME == "vibevoice-asr")),
         "temperature": temp,
         "prompt": prompt,
         "beam_size": ASR_BEAM,
@@ -1034,6 +1045,9 @@ def round_or_none(x: float | None, nd: int = 3):
 def judge_quality(audio_meta: dict, asr_meta: dict, text: str) -> tuple[str, list[str]]:
     reasons: list[str] = []
 
+    if not text.strip():
+        reasons.append("empty_text")
+
     rms = audio_meta.get("rms_dbfs")
     sil = audio_meta.get("silence_ratio")
     clip = audio_meta.get("clip_ratio")
@@ -1070,7 +1084,7 @@ def judge_quality(audio_meta: dict, asr_meta: dict, text: str) -> tuple[str, lis
         if best >= 20:
             reasons.append("long_char_run")
 
-    bad_triggers = {"high_no_speech_prob", "high_compression_ratio", "long_char_run"}
+    bad_triggers = {"empty_text", "high_no_speech_prob", "high_compression_ratio", "long_char_run"}
     maybe_triggers = {"low_rms", "high_silence_ratio", "low_avg_logprob", "clipping"}
 
     if any(r in bad_triggers for r in reasons):
@@ -1119,7 +1133,7 @@ def get_asr_provider():
         _ASR_PROVIDER = create_asr_provider(ASR_CFG, get_model_for)
     return _ASR_PROVIDER
 
-def set_current_qwen_model(model_name: str, model_id: str | None = None) -> None:
+def set_current_remote_model(model_name: str, model_id: str | None = None) -> None:
     normalized_name = str(model_name or "").strip()
     normalized_id = str(model_id or "").strip()
     if normalized_name:
@@ -1128,17 +1142,21 @@ def set_current_qwen_model(model_name: str, model_id: str | None = None) -> None
     if normalized_id:
         CURRENT["asr"]["model_id"] = normalized_id
 
-async def refresh_qwen_model_info() -> dict | None:
-    if ASR_PROVIDER_NAME != "qwen3-asr":
+async def refresh_remote_model_info() -> dict | None:
+    if ASR_PROVIDER_NAME == "whisper":
         return None
     try:
         info = await get_asr_provider().ready()
     except Exception as exc:
-        log(f"[ASR] Qwen /ready failed: {exc}")
+        log(f"[ASR] {ASR_PROVIDER_NAME} /ready failed: {exc}")
         return None
     model_name = str(info.get("model") or "").strip()
     model_id = str(info.get("model_id") or "").strip()
-    set_current_qwen_model(model_name, model_id)
+    set_current_remote_model(model_name, model_id)
+    backend = str(info.get("backend") or "").strip().lower()
+    language = str((ASR_CFG.get("vibevoice") or {}).get("language") or "").strip().lower()
+    if ASR_PROVIDER_NAME == "vibevoice-asr" and backend == "vibeasr-cpp" and language in {"ja", "japanese", "日本語"}:
+        log("[ASR] WARNING: VibeVoice-ASR-BitNetの明示対応言語に日本語は含まれていません。Transformers版を使用してください。")
     return info
 
 def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
@@ -1411,7 +1429,7 @@ correction_tool_app.state.default_prompt_id = (
     or (_correction_prompt_items[0]["id"] if _correction_prompt_items else "correction_v1")
 )
 correction_tool_app.state.asr_models = (
-    [] if ASR_PROVIDER_NAME == "qwen3-asr" else list((MODELS_REGISTRY or {}).keys())
+    [] if ASR_PROVIDER_NAME != "whisper" else list((MODELS_REGISTRY or {}).keys())
 )
 app.mount("/analysis-tools", analysis_tools_app)
 app.mount("/so-labeler", so_labeler_app)
@@ -1639,7 +1657,7 @@ async def api_version():
 @app.on_event("startup")
 async def _startup():
     load_patient_data()
-    await refresh_qwen_model_info()
+    await refresh_remote_model_info()
     asyncio.create_task(dyna_watch_task())
 
     # Auto LLM worker（逐次キュー処理）
@@ -1902,8 +1920,8 @@ async def api_llm_soap(payload: Dict[str, Any] = Body(...)):
 @app.get("/api/asr/models")
 async def api_asr_models():
     if ASR_PROVIDER_NAME != "whisper":
-        ready_info = await refresh_qwen_model_info()
-        model_name = str(CURRENT.get("asr", {}).get("model_name") or "qwen3-asr")
+        ready_info = await refresh_remote_model_info()
+        model_name = str(CURRENT.get("asr", {}).get("model_name") or ASR_PROVIDER_NAME)
         display_name = model_name if ready_info is not None else "未接続"
         return {
             "provider": ASR_PROVIDER_NAME,
@@ -2534,8 +2552,14 @@ async def asr_worker(ws: WebSocket, st: State):
 
             result = await provider.transcribe(wav, cfg_rt)
 
-            if result.provider == "qwen3-asr" and result.model:
-                set_current_qwen_model(result.model)
+            if not result.text.strip():
+                log(
+                    f"[ASR] empty result seg#{seg_id:03d} provider={result.provider} "
+                    f"backend={result.backend} model={result.model}"
+                )
+
+            if result.provider != "whisper" and result.model:
+                set_current_remote_model(result.model, result.model_id)
 
             # UI / .txt 用：Whisperはセグメントごとの改行を維持する。
             text_ui = result.text
@@ -2557,6 +2581,12 @@ async def asr_worker(ws: WebSocket, st: State):
                 asr_meta["timing"] = result.timing
             if result.request_id:
                 asr_meta["request_id"] = result.request_id
+            if result.backend:
+                asr_meta["backend"] = result.backend
+            if result.model_id:
+                asr_meta["model_id"] = result.model_id
+            if result.segments:
+                asr_meta["segments"] = result.segments
             # 後方互換: Whisperが実際に返した指標だけを従来キーにも保存する。
             if result.provider == "whisper":
                 for metric_name in ("avg_logprob", "no_speech_prob", "compression_ratio"):
@@ -2590,6 +2620,9 @@ async def asr_worker(ws: WebSocket, st: State):
                     "language": cfg_rt.get("language"),
                     "temperature": cfg_rt.get("temperature"),
                     "prompt": cfg_rt.get("prompt"),
+                    "context": cfg_rt.get("context") if result.provider != "whisper" else None,
+                    "hotwords": cfg_rt.get("hotwords") if result.provider == "vibevoice-asr" else None,
+                    "include_segments": cfg_rt.get("include_segments") if result.provider == "vibevoice-asr" else None,
                     "beam_size": cfg_rt.get("beam_size"),
                     "condition_on_previous_text": cfg_rt.get("condition_on_previous_text"),
                 },

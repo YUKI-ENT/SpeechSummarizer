@@ -215,11 +215,31 @@ localhostのQwen3-ASR APIを使う設定:
 
 起動前に `curl http://127.0.0.1:8010/ready` でQwen3-ASR側が `status: ready` を返すことを確認してください。Qwen側のモデルはAPIサーバー起動時に固定されます。SpeechSummarizerは`/ready`と認識応答から実際のモデル名を取得するため、Qwenのモデル変更時にSpeechSummarizer側の設定を同期する必要はありません。クライアントのモデル名は`asr.provider`と実モデル名を組み合わせ、たとえば`qwen3-asr:1.7b`と表示します。
 
+localhostのVibeVoice-ASR APIを使う設定:
+
+```json
+"asr": {
+  "provider": "vibevoice-asr",
+  "vibevoice": {
+    "base_url": "http://127.0.0.1:8020",
+    "timeout_sec": 135,
+    "language": "Japanese",
+    "context": "日本の医療現場の会話。",
+    "hotwords": ["滲出性中耳炎", "鼓膜切開"],
+    "include_segments": true
+  }
+}
+```
+
+起動前に `curl http://127.0.0.1:8020/ready` でReady状態を確認してください。`include_segments` を有効にすると、APIが返した話者・timestamp付きの`segments`を各ASRレコードの`meta.asr.segments`へ保存します。通常の画面表示とLLM入力には、従来どおりAPIの`text`を使用します。
+
+`/ready`の`backend`が`vibeasr-cpp`、`model`が`bitnet`の場合、公式モデルカードの明示対応言語に日本語は含まれません。日本語音声にはTransformers版（`backend: transformers`、通常はmodel alias `7b`または`hf`）を使用してください。
+
 Windows GUIランチャーから利用する場合は、ASRタブでproviderを`qwen3-asr`にし、API URL、言語、Contextを設定できます。API稼働状況には`/ready`から取得したReady状態、モデルサイズ（0.6b/1.7b等）、model ID、device、queue、API versionが表示されます。「Windows GUIランチャーでQwenASRを起動・停止」を有効にして`QwenASR-Server.exe`、`config.json`、起動モデル（0.6b/1.7b）を指定すると、ランチャーは`--config`と`--model`を付けてQwenASRを先に起動し、`/ready`を確認してからSpeechSummarizer本体を起動します。QwenASRの設定ファイルは書き換えません。「Qwen再起動」でモデル変更を反映できます。ランチャーが起動したQwenASRは、サーバー停止時とランチャー終了時に一緒に停止します。すでに同じURL・選択モデルでQwenASRがreadyの場合は外部プロセスとして利用し、ランチャーからは停止しません。
 
-Pythonから`app.py`を直接起動する場合、ランチャーによるプロセス管理は行われません。従来どおり`config.json`のproviderとAPI URLを使い、QwenASRは別途起動してください。
+Pythonから`app.py`を直接起動する場合、ランチャーによるプロセス管理は行われません。`config.json`のproviderとAPI URLを使い、QwenASRまたはVibeVoiceASRを別途起動してください。
 
-JSONLにはprovider名、engine、実測timing、providerが実際に返したmetricsだけを保存します。`avg_logprob`、`no_speech_prob`、`compression_ratio` はWhisper結果にだけ含まれ、Qwen用の代替値は生成しません。Qwen使用時の品質判定は既存の音声メタデータとテキスト検査だけで行います。
+JSONLにはprovider名、engine、実測timing、providerが実際に返したmetricsだけを保存します。`avg_logprob`、`no_speech_prob`、`compression_ratio` はWhisper結果にだけ含まれ、外部API用の代替値は生成しません。外部API使用時の品質判定は既存の音声メタデータとテキスト検査だけで行います。
 
 ## 起動方法
 ### Windows Exe版
