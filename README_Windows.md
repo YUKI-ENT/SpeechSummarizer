@@ -233,6 +233,11 @@ Port、HTTPS、モデル名、API Keyを個別に指定できます。Ollamaの�
 `127.0.0.1` / `11434` / HTTPSオフです。旧`base_url`設定はGUIで読み込み、保存時に
 新しい`server`・`port`形式へ移行します。
 
+同じ「LLM」タブの「Reasoningを有効にする（OFF推奨）」で、LLMのreasoningを
+切り替えられます。OFFでは`reasoning_effort: "none"`、ONでは
+`reasoning_effort: "medium"`をOpenAI互換APIへ送信します。変更は設定保存後、
+SpeechSummarizerサーバーを再起動すると反映されます。
+
 ## ビルド時の注意
 
 - ビルド開始時に、指定した `DistDir` と `BuildDir` は削除されます。
