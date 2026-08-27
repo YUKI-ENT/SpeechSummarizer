@@ -629,6 +629,11 @@ def _suggest_with_openai(request: Request, transcript: str, model: str, prompt_i
     timeout_sec = float(llm_cfg.get("timeout_sec") or 120)
     temperature = float(llm_cfg.get("temperature") or 0.0)
     top_p = float(llm_cfg.get("top_p") or 0.9)
+    reasoning_enabled = (
+        llm_cfg.get("reasoning_enabled")
+        if isinstance(llm_cfg.get("reasoning_enabled"), bool)
+        else None
+    )
     _, templates, default_prompt_id = _prompt_items(request)
     template = templates.get(prompt_id or default_prompt_id) or next(iter(templates.values()))
     prompt = _build_correction_prompt(template, transcript)
@@ -645,6 +650,7 @@ def _suggest_with_openai(request: Request, transcript: str, model: str, prompt_i
         timeout_sec=timeout_sec,
         temperature=temperature,
         top_p=top_p,
+        reasoning_enabled=reasoning_enabled,
     )
     _debug_dump("[correction_tool][openai_response_summary]", _summarize_openai_response(data))
     text = _strip_think_blocks(text)

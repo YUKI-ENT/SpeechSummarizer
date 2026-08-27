@@ -101,6 +101,7 @@
     "timeout": 120,
     "temperature": 0.0,
     "top_p": 0.9,
+    "reasoning_enabled": false,
     "default_prompt_id": "soap_v1",
     "correction_tool_default_prompt_id": "correction_v1",
     "correction_tool_prompts": {

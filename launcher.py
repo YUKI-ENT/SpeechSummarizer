@@ -509,7 +509,7 @@ class LauncherApp:
     def _build_llm_tab(self, parent: ttk.Frame) -> None:
         for i in range(4):
             parent.columnconfigure(i, weight=1)
-        parent.rowconfigure(6, weight=1)
+        parent.rowconfigure(7, weight=1)
 
         row = 0
         self._add_entry(parent, "llm_server", "LLMサーバー (IP/ホスト名)", ("llm", "server"), kind="str", row=row, width=32)
@@ -526,6 +526,8 @@ class LauncherApp:
         row += 1
         self._add_entry(parent, "llm_top_p", "Top P", ("llm", "top_p"), kind="float", row=row, width=12)
         self._add_entry(parent, "llm_default_prompt_id", "既定Prompt ID", ("llm", "default_prompt_id"), kind="str", row=row, col=2, width=20)
+        row += 1
+        self._add_bool(parent, "llm_reasoning_enabled", "Reasoningを有効化", ("llm", "reasoning_enabled"), row=row)
         row += 1
         self._add_bool(parent, "auto_llm", "自動LLM", ("auto_llm",), row=row)
         row += 1

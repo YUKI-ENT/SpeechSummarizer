@@ -55,6 +55,7 @@ def openai_chat_text(
     top_p: float,
     system_prompt: str = "",
     json_response: bool = False,
+    reasoning_enabled: bool | None = None,
 ) -> tuple[str, dict[str, Any]]:
     messages: list[dict[str, str]] = []
     if system_prompt.strip():
@@ -67,6 +68,8 @@ def openai_chat_text(
         "temperature": temperature,
         "top_p": top_p,
     }
+    if reasoning_enabled is not None:
+        body["reasoning_effort"] = "medium" if reasoning_enabled else "none"
     if json_response:
         body["response_format"] = {"type": "json_object"}
 

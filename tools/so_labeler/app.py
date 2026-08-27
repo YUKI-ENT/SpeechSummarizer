@@ -66,6 +66,11 @@ def _llm_config_from_state(request: Request) -> LlmConfig:
         timeout_sec=int(data.get('timeout_sec') or 120),
         temperature=float(data.get('temperature') or 0.0),
         top_p=float(data.get('top_p') or 0.9),
+        reasoning_enabled=(
+            data.get('reasoning_enabled')
+            if isinstance(data.get('reasoning_enabled'), bool)
+            else None
+        ),
     )
 
 

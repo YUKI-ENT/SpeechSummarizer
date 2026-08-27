@@ -29,6 +29,35 @@ class OpenAiCompatClientTests(unittest.TestCase):
         self.assertEqual(kwargs["headers"]["Authorization"], "Bearer secret")
         self.assertEqual(kwargs["json"]["messages"], [{"role": "user", "content": "hello"}])
         self.assertNotIn("response_format", kwargs["json"])
+        self.assertNotIn("reasoning_effort", kwargs["json"])
+
+    @patch("llm_openai_compat.requests.post")
+    def test_chat_completions_disables_reasoning(self, post):
+        response = Mock()
+        response.json.return_value = {"choices": [{"message": {"content": "summary"}}]}
+        post.return_value = response
+
+        openai_chat_text(
+            base_url="http://localhost:1234/v1", api_key="", model="local-model",
+            prompt="hello", timeout_sec=30, temperature=0.2, top_p=0.8,
+            reasoning_enabled=False,
+        )
+
+        self.assertEqual(post.call_args.kwargs["json"]["reasoning_effort"], "none")
+
+    @patch("llm_openai_compat.requests.post")
+    def test_chat_completions_enables_reasoning(self, post):
+        response = Mock()
+        response.json.return_value = {"choices": [{"message": {"content": "summary"}}]}
+        post.return_value = response
+
+        openai_chat_text(
+            base_url="http://localhost:1234/v1", api_key="", model="local-model",
+            prompt="hello", timeout_sec=30, temperature=0.2, top_p=0.8,
+            reasoning_enabled=True,
+        )
+
+        self.assertEqual(post.call_args.kwargs["json"]["reasoning_effort"], "medium")
 
     @patch("llm_openai_compat.requests.get")
     def test_lists_models_from_openai_schema(self, get):

@@ -61,6 +61,7 @@ class LlmConfig:
     timeout_sec: int = 120
     temperature: float = 0.0
     top_p: float = 0.9
+    reasoning_enabled: bool | None = None
 
 
 def list_openai_models(cfg: LlmConfig) -> list[str]:
@@ -164,6 +165,7 @@ def label_session_with_openai(
             timeout_sec=cfg.timeout_sec,
             temperature=cfg.temperature,
             top_p=cfg.top_p,
+            reasoning_enabled=cfg.reasoning_enabled,
         )
         elapsed = time.perf_counter() - started
         _debug_log(

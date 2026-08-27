@@ -548,6 +548,10 @@ LLM_MODEL_DEFAULT = (LLM_CFG.get("model_default") or "local-model").strip()
 LLM_TIMEOUT = float(LLM_CFG.get("timeout") or 120.0)
 LLM_TEMPERATURE = float(LLM_CFG.get("temperature") or 0.0)
 LLM_TOP_P = float(LLM_CFG.get("top_p") or 0.9)
+_LLM_REASONING_ENABLED_RAW = LLM_CFG.get("reasoning_enabled")
+LLM_REASONING_ENABLED: Optional[bool] = (
+    _LLM_REASONING_ENABLED_RAW if isinstance(_LLM_REASONING_ENABLED_RAW, bool) else None
+)
 
 LLM_PROMPTS: Dict[str, Dict[str, Any]] = LLM_CFG.get("prompts", {})  # ★ dictのまま
 LLM_DEFAULT_PROMPT_ID = (LLM_CFG.get("default_prompt_id") or "soap_v1").strip()
@@ -577,6 +581,7 @@ def generate_llm_text(*, model: str, prompt: str, timeout_sec: float,
         timeout_sec=timeout_sec,
         temperature=temperature,
         top_p=top_p,
+        reasoning_enabled=LLM_REASONING_ENABLED,
     )
     log(f"[LLM] id={payload.get('id', '')} model={payload.get('model', model)} response_len={len(text)}")
     return text
@@ -1384,6 +1389,7 @@ so_labeler_app.state.llm_config = {
     "timeout_sec": int(LLM_TIMEOUT),
     "temperature": float(LLM_TEMPERATURE),
     "top_p": float(LLM_TOP_P),
+    "reasoning_enabled": LLM_REASONING_ENABLED,
 }
 so_labeler_app.state.so_labeler_prompt_items = _so_labeler_prompt_items
 so_labeler_app.state.so_labeler_prompt_templates = _so_labeler_prompt_templates
@@ -1400,6 +1406,7 @@ correction_tool_app.state.llm_config = {
     "timeout_sec": int(LLM_TIMEOUT),
     "temperature": float(LLM_TEMPERATURE),
     "top_p": float(LLM_TOP_P),
+    "reasoning_enabled": LLM_REASONING_ENABLED,
 }
 _correction_prompt_items = [{"id": "correction_v1", "label": "誤変換補正候補 v1"}]
 _correction_prompt_templates = {
