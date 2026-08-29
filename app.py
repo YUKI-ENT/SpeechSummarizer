@@ -14,6 +14,8 @@ from pathlib import Path
 from urllib.parse import unquote
 import re
 import shutil
+import tempfile
+import uuid
 from typing import Any, Dict, List, Optional
 from app_version import APP_VERSION
 from asr_providers import asr_model_label, create_asr_provider
@@ -136,9 +138,11 @@ def resolve_relpath(p: str | Path) -> Path:
 
 OUTPUTS_DIR = resolve_relpath(CFG.get("outputs_dir", "data/sessions"))
 WAV_DIR = resolve_relpath(CFG.get("wav_dir", "data/wav"))
+MEMO_OUTPUTS_DIR = resolve_relpath(CFG.get("memo_outputs_dir", "data/memo/outputs"))
 PATIENT_DATA_PATH = resolve_relpath(CFG.get("patient_data_path", "data/patient_data.jsonl"))
 ensure_dir(OUTPUTS_DIR)
 ensure_dir(WAV_DIR)
+ensure_dir(MEMO_OUTPUTS_DIR)
 PATIENT_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 CORRECTION_RULES_PATH = resolve_relpath(CFG.get("correction_rules_path", "corrections.json"))
@@ -487,6 +491,76 @@ def new_session(patient_id: str):
         },
         CURRENT["jsonl_path"]
     )
+
+
+ASR_TARGET_ID_RE = re.compile(r"^[0-9A-Za-z_-]{1,160}$")
+
+
+def normalize_asr_target(target: dict) -> dict:
+    """Validate the logical destination carried by an ASR job."""
+    target_type = str((target or {}).get("type") or "").strip().lower()
+    target_id = str((target or {}).get("id") or "").strip()
+    if target_type not in {"session", "memo"}:
+        raise ValueError(f"unknown ASR target type: {target_type}")
+    if not ASR_TARGET_ID_RE.fullmatch(target_id):
+        raise ValueError("invalid ASR target id")
+    return {"type": target_type, "id": target_id}
+
+
+def current_session_target() -> dict:
+    ensure_unknown_session()
+    text_path = Path(str(CURRENT["text_path"]))
+    return {"type": "session", "id": text_path.stem}
+
+
+def _memo_paths(memo_id: str) -> dict[str, Path]:
+    normalized = normalize_asr_target({"type": "memo", "id": memo_id})
+    stem = normalized["id"]
+    return {
+        "draft_path": MEMO_OUTPUTS_DIR / f"{stem}.draft.txt",
+        "meta_path": MEMO_OUTPUTS_DIR / f"{stem}.meta.json",
+    }
+
+
+def load_memo_meta(memo_id: str) -> dict:
+    paths = _memo_paths(memo_id)
+    if not paths["meta_path"].is_file():
+        raise FileNotFoundError(f"memo not found: {memo_id}")
+    with paths["meta_path"].open("r", encoding="utf-8") as f:
+        value = json.load(f)
+    return value if isinstance(value, dict) else {}
+
+
+def resolve_asr_target(target: dict, *, require_existing: bool = True) -> dict:
+    """Resolve a logical target to server-owned paths; clients never provide paths."""
+    normalized = normalize_asr_target(target)
+    target_type = normalized["type"]
+    target_id = normalized["id"]
+
+    if target_type == "session":
+        text_path = OUTPUTS_DIR / f"{target_id}.txt"
+        jsonl_path = OUTPUTS_DIR / f"{target_id}.jsonl"
+        if require_existing and (not text_path.is_file() or not jsonl_path.is_file()):
+            raise FileNotFoundError(f"session not found: {target_id}")
+        parsed = re.match(r"^(?P<pid>.+)_(?P<stamp>\d{8}_\d{6})$", target_id)
+        patient_id = parsed.group("pid") if parsed else "unknown"
+        return {
+            **normalized,
+            "patient_id": patient_id,
+            "text_path": text_path,
+            "jsonl_path": jsonl_path,
+            "wav_dir": WAV_DIR,
+        }
+
+    paths = _memo_paths(target_id)
+    if require_existing and not paths["meta_path"].is_file():
+        raise FileNotFoundError(f"memo not found: {target_id}")
+    meta = load_memo_meta(target_id) if paths["meta_path"].is_file() else {}
+    return {
+        **normalized,
+        "patient_id": str(meta.get("patient_id") or ""),
+        "draft_path": paths["draft_path"],
+    }
 
 def _today_yyyymmdd() -> str:
     return datetime.datetime.now().strftime("%Y%m%d")
@@ -1296,7 +1370,8 @@ CLIENTS: dict[WebSocket, "State"] = {}
 async def broadcast(obj: dict, *, reset_states: bool = False):
     dead: list[WebSocket] = []
     for ws, st in list(CLIENTS.items()):
-        if reset_states:
+        # Patient changes affect the clinical session, never an open memo recording.
+        if reset_states and st.active_target is None:
             st.reset_pending = True
         try:
             await ws.send_json(obj)
@@ -1309,6 +1384,8 @@ async def broadcast(obj: dict, *, reset_states: bool = False):
 def any_client_recording(*, within_sec: float = 2.0) -> bool:
     now = time.time()
     for st in CLIENTS.values():
+        if st.active_target and st.active_target.get("type") == "memo":
+            continue
         last_audio_rx = getattr(st, "last_audio_rx", 0.0) or 0.0
         if last_audio_rx > 0 and (now - last_audio_rx) <= within_sec:
             return True
@@ -1657,6 +1734,10 @@ STATIC_DIR = APP_DIR / "static"
 async def index():
     return FileResponse(str(STATIC_DIR / "index.html"))
 
+@app.get("/memo")
+async def memo_page():
+    return FileResponse(str(STATIC_DIR / "memo.html"))
+
 @app.get("/api/version")
 async def api_version():
     return {"ok": True, "version": APP_VERSION}
@@ -1676,6 +1757,148 @@ async def _startup():
 # -------------------------
 # LLM APIs
 # -------------------------
+MEMO_LLM_PROMPTS = {
+    "proofread": (
+        "以下は音声入力された医療メモです。内容や意味を変えず、誤字脱字、句読点、"
+        "明らかな音声認識の誤変換だけを修正してください。情報を追加・推測せず、修正後の本文だけを出力してください。\n\n"
+        "【メモ】\n{text}"
+    ),
+    "polish": (
+        "以下は音声入力された医療メモです。事実を追加・推測せず、内容を保ったまま、"
+        "読みやすく丁寧な医療文書として清書してください。不明な箇所は補完せず［要確認］とし、本文だけを出力してください。\n\n"
+        "【メモ】\n{text}"
+    ),
+    "referral_letter": (
+        "以下の音声入力を、診療情報提供書・紹介状の文案として整理してください。"
+        "紹介目的、傷病名、経過、所見・検査、治療内容、依頼事項を、入力に存在する範囲だけで構成してください。"
+        "情報を追加・推測せず、不足項目は［未入力］としてください。完成した本文だけを出力してください。\n\n"
+        "【音声入力】\n{text}"
+    ),
+}
+
+
+@app.post("/api/memos")
+async def api_memo_create(payload: Dict[str, Any] = Body(default={})):
+    patient_id = str(payload.get("patient_id") or CURRENT.get("patient_id") or "").strip()
+    document_type = str(payload.get("document_type") or "free_text").strip()[:80]
+    title = str(payload.get("title") or "音声メモ").strip()[:200] or "音声メモ"
+    memo_id = f"memo_{now_stamp()}_{uuid.uuid4().hex[:8]}"
+    paths = _memo_paths(memo_id)
+    created_at = now_iso()
+    meta = {
+        "id": memo_id,
+        "patient_id": patient_id,
+        "document_type": document_type,
+        "title": title,
+        "status": "draft",
+        "created_at": created_at,
+        "updated_at": created_at,
+    }
+    paths["draft_path"].touch(exist_ok=False)
+    paths["meta_path"].write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "memo": meta, "draft": ""}
+
+
+@app.get("/api/memos")
+async def api_memo_list(patient_id: Optional[str] = None):
+    requested_patient_id = (
+        str(CURRENT.get("patient_id") or "").strip()
+        if patient_id is None
+        else str(patient_id).strip()
+    )
+    items = []
+    for meta_path in MEMO_OUTPUTS_DIR.glob("memo_*.meta.json"):
+        try:
+            with meta_path.open("r", encoding="utf-8") as f:
+                meta = json.load(f)
+            if not isinstance(meta, dict):
+                continue
+            if str(meta.get("patient_id") or "") != requested_patient_id:
+                continue
+            memo_id = str(meta.get("id") or "")
+            normalize_asr_target({"type": "memo", "id": memo_id})
+            items.append({
+                "id": memo_id,
+                "patient_id": requested_patient_id,
+                "title": str(meta.get("title") or "音声メモ"),
+                "status": str(meta.get("status") or "draft"),
+                "created_at": str(meta.get("created_at") or ""),
+                "updated_at": str(meta.get("updated_at") or meta.get("created_at") or ""),
+            })
+        except (OSError, ValueError, json.JSONDecodeError):
+            continue
+    items.sort(key=lambda item: (item["updated_at"], item["id"]), reverse=True)
+    return {"ok": True, "patient_id": requested_patient_id, "items": items[:200]}
+
+
+@app.get("/api/memos/{memo_id}")
+async def api_memo_get(memo_id: str):
+    try:
+        meta = load_memo_meta(memo_id)
+        paths = _memo_paths(memo_id)
+    except (ValueError, FileNotFoundError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+    return {
+        "ok": True,
+        "memo": meta,
+        "draft": paths["draft_path"].read_text(encoding="utf-8", errors="replace") if paths["draft_path"].exists() else "",
+    }
+
+
+@app.post("/api/memos/{memo_id}/draft")
+async def api_memo_save_draft(memo_id: str, payload: Dict[str, Any] = Body(...)):
+    text = payload.get("text")
+    if not isinstance(text, str):
+        return JSONResponse({"ok": False, "error": "text must be a string"}, status_code=400)
+    if len(text) > 100000:
+        return JSONResponse({"ok": False, "error": "text too large"}, status_code=413)
+    try:
+        meta = load_memo_meta(memo_id)
+        paths = _memo_paths(memo_id)
+    except (ValueError, FileNotFoundError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+
+    paths["draft_path"].write_text(text, encoding="utf-8")
+    meta["updated_at"] = now_iso()
+    paths["meta_path"].write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
+    return {"ok": True, "updated_at": meta["updated_at"]}
+
+
+@app.post("/api/memos/{memo_id}/llm")
+async def api_memo_llm(memo_id: str, payload: Dict[str, Any] = Body(...)):
+    action = str(payload.get("action") or "proofread").strip()
+    source_text = payload.get("text")
+    model = str(payload.get("model") or LLM_MODEL_DEFAULT).strip() or LLM_MODEL_DEFAULT
+    if action not in MEMO_LLM_PROMPTS:
+        return JSONResponse({"ok": False, "error": "unknown action"}, status_code=400)
+    if not isinstance(source_text, str) or not source_text.strip():
+        return JSONResponse({"ok": False, "error": "text required"}, status_code=400)
+    if len(source_text) > 50000:
+        return JSONResponse({"ok": False, "error": "text too large"}, status_code=413)
+    try:
+        load_memo_meta(memo_id)
+    except (ValueError, FileNotFoundError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
+
+    prompt = MEMO_LLM_PROMPTS[action].replace("{text}", source_text.strip())
+    t0 = time.time()
+    try:
+        result = generate_llm_text(
+            model=model,
+            prompt=prompt,
+            timeout_sec=LLM_TIMEOUT,
+            temperature=LLM_TEMPERATURE,
+            top_p=LLM_TOP_P,
+        )
+        result = strip_thinking_from_response(result).strip()
+        return {
+            "ok": True, "text": result, "action": action, "model": model,
+            "elapsed_sec": round(time.time() - t0, 3),
+        }
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+
+
 @app.get("/api/patient/{pid}/info")
 async def api_patient_info(pid: str):
     info = get_patient_info(pid)
@@ -2347,7 +2570,7 @@ async def api_patient_switch(payload: Dict[str, Any] = Body(...)):
 # Per-connection state
 # -------------------------
 class State:
-    def __init__(self):
+    def __init__(self, active_target: dict | None = None):
         self.buf = np.zeros((0,), dtype=np.float32)
         self.ring: list[np.ndarray] = []
         self.in_speech = False
@@ -2366,6 +2589,13 @@ class State:
         self.asr_q: asyncio.Queue[dict] = asyncio.Queue(maxsize=int(CFG.get("asr_queue", 20)))
         self.asr_task: asyncio.Task | None = None
         self.reset_pending = False
+        self.active_target = normalize_asr_target(active_target) if active_target else None
+        self.active_generation = 0
+
+    def capture_target(self) -> dict:
+        if self.active_target is not None:
+            return dict(self.active_target)
+        return current_session_target()
 
     def reset_audio(self):
         self.buf = np.zeros((0,), dtype=np.float32)
@@ -2378,11 +2608,19 @@ class State:
         self.noise_levels_db.clear()
         self.calibration_frames = 0
         self.last_threshold_db = calc_auto_threshold_db(None)
+        # Queued jobs already carry an immutable target. Keep them so results from
+        # just before a patient change are saved to the original session.
 
+    def discard_pending_jobs(self):
+        """Release temporary memo audio when a WebSocket is going away."""
         try:
             while True:
-                _ = self.asr_q.get_nowait()
-                self.asr_q.task_done()
+                job = self.asr_q.get_nowait()
+                try:
+                    if (job.get("target") or {}).get("type") == "memo" and job.get("wav"):
+                        Path(str(job["wav"])).unlink(missing_ok=True)
+                finally:
+                    self.asr_q.task_done()
         except asyncio.QueueEmpty:
             pass
 
@@ -2421,7 +2659,7 @@ class State:
             self.last_threshold_db = clamp_float(MANUAL_THRESHOLD_DB, VAD_MIN_THRESHOLD_DB, VAD_MAX_THRESHOLD_DB)
         return self.last_threshold_db
 
-    def finalize_segment(self):
+    def finalize_segment(self, target: dict, generation: int = 0):
         if not self.utter_frames:
             self.in_speech = False
             self.voice_run = 0
@@ -2441,8 +2679,16 @@ class State:
         if dur < MIN_SEC:
             return None
 
+        destination = resolve_asr_target(target)
         self.seg_index += 1
-        wavpath = WAV_DIR / f"seg_{now_stamp()}_{self.seg_index:03d}.wav"
+        if destination["type"] == "memo":
+            temp_wav = tempfile.NamedTemporaryFile(prefix="speechsummarizer_memo_", suffix=".wav", delete=False)
+            temp_wav.close()
+            wavpath = Path(temp_wav.name)
+        else:
+            wav_dir = destination["wav_dir"]
+            ensure_dir(wav_dir)
+            wavpath = wav_dir / f"seg_{now_stamp()}_{self.seg_index:03d}.wav"
         save_wav_mono16(wavpath, audio, SR)
 
         audio_meta = {
@@ -2461,13 +2707,15 @@ class State:
             "dur": round(dur, 2),
             "wav": str(wavpath),
             "audio_meta": audio_meta,
+            "target": normalize_asr_target(target),
+            "generation": generation,
         }
 
-        ensure_unknown_session()
-        append_jsonl(
-            {"type": "saved", "ts": now_iso(), "patient_id": CURRENT["patient_id"], **seg},
-            CURRENT["jsonl_path"]
-        )
+        if destination["type"] == "session":
+            append_jsonl(
+                {"type": "saved", "ts": now_iso(), "patient_id": destination["patient_id"], **seg},
+                str(destination["jsonl_path"])
+            )
 
         cleanup_expired_wavs(CFG)
         return seg
@@ -2602,39 +2850,41 @@ async def asr_worker(ws: WebSocket, st: State):
 
             quality, reasons = judge_quality(audio_meta, asr_meta, text_for_judge)
 
-            ensure_unknown_session()
-            pid = CURRENT["patient_id"]
-            txt_path = CURRENT["text_path"]
-            jsonl_path = CURRENT["jsonl_path"]
+            target = normalize_asr_target(job.get("target") or current_session_target())
+            destination = resolve_asr_target(target)
+            pid = destination["patient_id"]
+            generation = int(job.get("generation") or 0)
 
-            # .txt には読みやすさ優先で改行入りを保存
-            if text_ui:
-                append_text_line(txt_path, text_ui)
-
-            # JSONL には改行入りを渡してOK（append_jsonl 側で改行を潰して1行保証）
-            append_jsonl({
-                "type": "asr",
-                "ts": now_iso(),
-                "patient_id": pid,
-                "seg_id": seg_id,
-                "dur": dur,
-                "wav": wav,
-                "text": text_ui,
-                "asr_cfg": {
-                    "provider": result.provider,
-                    "model_name": result.model or cfg_rt.get("model_name"),
-                    "model_path": cfg_rt.get("model_path") if result.provider == "whisper" else None,
-                    "language": cfg_rt.get("language"),
-                    "temperature": cfg_rt.get("temperature"),
-                    "prompt": cfg_rt.get("prompt"),
-                    "context": cfg_rt.get("context") if result.provider != "whisper" else None,
-                    "hotwords": cfg_rt.get("hotwords") if result.provider == "vibevoice-asr" else None,
-                    "include_segments": cfg_rt.get("include_segments") if result.provider == "vibevoice-asr" else None,
-                    "beam_size": cfg_rt.get("beam_size"),
-                    "condition_on_previous_text": cfg_rt.get("condition_on_previous_text"),
-                },
-                "meta": {"audio": audio_meta, "asr": asr_meta, "quality": quality, "reasons": reasons}
-            }, jsonl_path)
+            # Memo ASR is intentionally ephemeral. Clinical sessions retain the
+            # existing readable transcript and JSONL audit trail.
+            if destination["type"] == "session":
+                if text_ui:
+                    append_text_line(str(destination["text_path"]), text_ui)
+                append_jsonl({
+                    "type": "asr",
+                    "ts": now_iso(),
+                    "patient_id": pid,
+                    "seg_id": seg_id,
+                    "dur": dur,
+                    "wav": wav,
+                    "text": text_ui,
+                    "target": target,
+                    "generation": generation,
+                    "asr_cfg": {
+                        "provider": result.provider,
+                        "model_name": result.model or cfg_rt.get("model_name"),
+                        "model_path": cfg_rt.get("model_path") if result.provider == "whisper" else None,
+                        "language": cfg_rt.get("language"),
+                        "temperature": cfg_rt.get("temperature"),
+                        "prompt": cfg_rt.get("prompt"),
+                        "context": cfg_rt.get("context") if result.provider != "whisper" else None,
+                        "hotwords": cfg_rt.get("hotwords") if result.provider == "vibevoice-asr" else None,
+                        "include_segments": cfg_rt.get("include_segments") if result.provider == "vibevoice-asr" else None,
+                        "beam_size": cfg_rt.get("beam_size"),
+                        "condition_on_previous_text": cfg_rt.get("condition_on_previous_text"),
+                    },
+                    "meta": {"audio": audio_meta, "asr": asr_meta, "quality": quality, "reasons": reasons}
+                }, str(destination["jsonl_path"]))
 
             log(
                 f"[ASR] done seg#{seg_id:03d} sec={dt:.2f} "
@@ -2652,6 +2902,8 @@ async def asr_worker(ws: WebSocket, st: State):
                 "dur": dur,
                 "wav": wav,
                 "text": text_ui,
+                "target": target,
+                "generation": generation,
                 "asr_cfg": {
                     "provider": result.provider,
                     "model_name": result.model or cfg_rt.get("model_name"),
@@ -2667,16 +2919,29 @@ async def asr_worker(ws: WebSocket, st: State):
             log(f"[ASR] ERROR: {e}")
             await ws.send_json({"type": "error", "where": "asr", "error": str(e), "job": job})
         finally:
+            try:
+                if (job.get("target") or {}).get("type") == "memo" and job.get("wav"):
+                    Path(str(job["wav"])).unlink(missing_ok=True)
+            except Exception as cleanup_error:
+                log(f"[MEMO] temporary wav cleanup failed: {cleanup_error}")
             st.asr_q.task_done()
 
 # -------------------------
 # WebSocket endpoint
 # -------------------------
 @app.websocket("/ws")
-async def ws_endpoint(ws: WebSocket):
+async def ws_endpoint(ws: WebSocket, target_type: str = "", target_id: str = ""):
+    active_target = None
+    if target_type or target_id:
+        try:
+            active_target = normalize_asr_target({"type": target_type, "id": target_id})
+            resolve_asr_target(active_target)
+        except (ValueError, FileNotFoundError):
+            await ws.close(code=1008, reason="invalid ASR target")
+            return
     await ws.accept()
 
-    st = State()
+    st = State(active_target=active_target)
     CLIENTS[ws] = st
 
     log(f"[WS] open enabled_asr={ASR_ENABLED}")
@@ -2687,7 +2952,8 @@ async def ws_endpoint(ws: WebSocket):
             "type": "status",
             "msg": "connected",
             "patient_id": CURRENT["patient_id"],
-            "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else "")
+            "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
+            "target": active_target,
         })
 
         while True:
@@ -2696,7 +2962,41 @@ async def ws_endpoint(ws: WebSocket):
                 st.reset_audio()
                 log("[WS] state reset (patient_changed)")
 
-            data = await ws.receive_bytes()
+            message = await ws.receive()
+            if message.get("type") == "websocket.disconnect":
+                raise WebSocketDisconnect
+
+            text_message = message.get("text")
+            if text_message is not None:
+                try:
+                    command = json.loads(text_message)
+                except json.JSONDecodeError:
+                    await ws.send_json({"type": "error", "where": "ws_command", "error": "invalid JSON"})
+                    continue
+                if command.get("command") == "set_generation":
+                    try:
+                        generation = int(command.get("generation"))
+                        if generation < 0:
+                            raise ValueError
+                    except (TypeError, ValueError):
+                        await ws.send_json({"type": "error", "where": "ws_command", "error": "invalid generation"})
+                        continue
+                    st.active_generation = generation
+                    st.reset_audio()
+                    await ws.send_json({"type": "generation_set", "generation": generation})
+                    continue
+                if command.get("command") == "flush":
+                    target = st.capture_target()
+                    seg = st.finalize_segment(target, st.active_generation)
+                    if seg:
+                        destination = resolve_asr_target(target)
+                        await st.asr_q.put(seg)
+                        await ws.send_json({"type": "saved", "patient_id": destination["patient_id"], **seg})
+                    await st.asr_q.join()
+                    await ws.send_json({"type": "flush_complete", "target": target, "generation": st.active_generation})
+                continue
+
+            data = message.get("bytes") or b""
             if st.reset_pending:
                 st.reset_pending = False
                 st.reset_audio()
@@ -2754,25 +3054,33 @@ async def ws_endpoint(ws: WebSocket):
                     else:
                         st.silence_run += 1
                         if st.silence_run >= END_SILENCE_FRAMES:
-                            seg = st.finalize_segment()
+                            target = st.capture_target()
+                            seg = st.finalize_segment(target, st.active_generation)
                             if seg:
-                                await ws.send_json({"type": "saved", "patient_id": CURRENT["patient_id"], **seg})
+                                destination = resolve_asr_target(target)
                                 try:
                                     st.asr_q.put_nowait(seg)
+                                    await ws.send_json({"type": "saved", "patient_id": destination["patient_id"], **seg})
                                     log(f"[ASR_Q] enqueued seg#{seg['seg_id']:03d} dur={seg['dur']}s wav={seg['wav']}")
                                 except asyncio.QueueFull:
+                                    if target["type"] == "memo":
+                                        Path(seg["wav"]).unlink(missing_ok=True)
                                     log(f"[ASR_Q] DROP seg#{seg['seg_id']:03d} (queue full)")
                                     await ws.send_json({"type": "asr_drop", "seg_id": seg["seg_id"], "reason": "asr_q full"})
                             continue
 
                     dur = sum(a.shape[0] for a in st.utter_frames) / SR
                     if dur >= MAX_SEC:
-                        seg = st.finalize_segment()
+                        target = st.capture_target()
+                        seg = st.finalize_segment(target, st.active_generation)
                         if seg:
-                            await ws.send_json({"type": "saved", "patient_id": CURRENT["patient_id"], **seg})
+                            destination = resolve_asr_target(target)
                             try:
                                 st.asr_q.put_nowait(seg)
+                                await ws.send_json({"type": "saved", "patient_id": destination["patient_id"], **seg})
                             except asyncio.QueueFull:
+                                if target["type"] == "memo":
+                                    Path(seg["wav"]).unlink(missing_ok=True)
                                 await ws.send_json({"type": "asr_drop", "seg_id": seg["seg_id"], "reason": "asr_q full"})
 
     except WebSocketDisconnect:
@@ -2781,7 +3089,7 @@ async def ws_endpoint(ws: WebSocket):
         # ★追加：最後の患者は patient_changed が起きないので、録音停止で auto_llm
         try:
             cur_jsonl = CURRENT.get("jsonl_path")
-            if cur_jsonl:
+            if active_target is None and cur_jsonl:
                 enqueue_auto_llm_for_jsonl(Path(cur_jsonl))
         except Exception as e:
             log(f"[AUTO_LLM] enqueue on stop failed: {e}")
@@ -2789,6 +3097,11 @@ async def ws_endpoint(ws: WebSocket):
         CLIENTS.pop(ws, None)
         if st.asr_task:
             st.asr_task.cancel()
+            try:
+                await st.asr_task
+            except asyncio.CancelledError:
+                pass
+        st.discard_pending_jobs()
 
 # -------------------------
 # main

@@ -20,6 +20,7 @@
   const hearingTextEl = document.getElementById('hearingText');
   const btnHearingToggle = document.getElementById('btnHearingToggle');
   const btnHearingClose = document.getElementById('btnHearingClose');
+  const btnMemo = document.getElementById('btnMemo');
   const btnZoomIn = document.getElementById('btnZoomIn');
   const btnZoomOut = document.getElementById('btnZoomOut');
 
@@ -58,6 +59,7 @@
   let hearingLastSavedSession = '';
   let hearingLastSavedText = '';
   let patientSessionRefreshTimer = null;
+  let flushWaiter = null;
 
 
   // ===== ログ =====
@@ -1034,10 +1036,22 @@
     }
 
     if (msg.type === 'asr') {
+      if (msg.target?.type === 'session') {
+        const expectedTargetId = (currentSessionTxt || '').replace(/\.txt$/, '');
+        if (msg.target.id !== expectedTargetId) {
+          log(`[asr] completed for previous session: ${msg.target.id}`);
+          return;
+        }
+      }
       if ((!currentSessionTxt || !hasSessionCard(currentSessionTxt)) && currentPatientId && msg.patient_id === currentPatientId) {
         schedulePatientSessionRefresh(currentPatientId, { autoShowLatest: true });
       }
       if (msg.text) appendLiveAsr(msg.text);
+    }
+
+    if (msg.type === 'flush_complete' && flushWaiter) {
+      flushWaiter.resolve();
+      flushWaiter = null;
     }
 
     if (msg.type === 'corrected' || msg.type === 'rebuilt' || msg.type === 'transcript_updated') {
@@ -1070,6 +1084,10 @@
     };
     ws.onerror = e => log('[ws] error ' + e);
     ws.onclose = () => {
+      if (flushWaiter) {
+        flushWaiter.resolve();
+        flushWaiter = null;
+      }
       log('[ws] disconnected – reconnecting in 3s...');
       // WebSocket切断は一時障害として扱い、手動OFFまでは録音状態を維持する。
       if (isRecording) {
@@ -1089,6 +1107,28 @@
       await new Promise(resolve => setTimeout(resolve, 100));
     }
     throw new Error('WS connect timeout');
+  }
+
+  async function flushAsrQueue() {
+    if (!ws || ws.readyState !== WebSocket.OPEN) return;
+    if (flushWaiter) return flushWaiter.promise;
+    let resolveWaiter;
+    const promise = new Promise(resolve => { resolveWaiter = resolve; });
+    const timeoutId = setTimeout(() => {
+      if (!flushWaiter) return;
+      flushWaiter.resolve();
+      flushWaiter = null;
+      log('[recording] ASR flush timeout');
+    }, 45000);
+    flushWaiter = {
+      promise,
+      resolve: () => {
+        clearTimeout(timeoutId);
+        resolveWaiter();
+      }
+    };
+    ws.send(JSON.stringify({ command: 'flush' }));
+    return promise;
   }
 
   function startRecordingWatchdog() {
@@ -1282,6 +1322,7 @@
 
       await flushHearingTranscriptSave();
       await cleanupAudioCapture();
+      await flushAsrQueue();
       // ★ WSは閉じない（常時接続を維持してpatient_changedを受信し続ける）
 
       try {
@@ -1302,8 +1343,10 @@
         await loadAllCardAsrText();
       }
       log('recording stop');
+      return true;
     } catch (e) {
       log('ERROR: ' + e);
+      return false;
     }
   }
 
@@ -1354,6 +1397,22 @@
       if (isRecording) await stopRecording();
       else await startRecording();
     };
+  }
+
+  if (btnMemo) {
+    btnMemo.addEventListener('click', async e => {
+      e.preventDefault();
+      if (isRecording) {
+        const proceed = window.confirm('録音中です。録音を終了して音声メモを開きますか？');
+        if (!proceed) return;
+        const stopped = await stopRecording();
+        if (!stopped) {
+          window.alert('録音を正常に終了できなかったため、音声メモを開きませんでした。');
+          return;
+        }
+      }
+      window.location.href = btnMemo.href;
+    });
   }
   // 旧Start/Stopボタン互換
   if (btnStart) btnStart.onclick = () => startRecording();

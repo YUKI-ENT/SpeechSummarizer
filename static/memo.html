@@ -1,0 +1,121 @@
+<!doctype html>
+<html lang="ja">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>音声メモ - SpeechSummarizer</title>
+  <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
+  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/memo.css">
+</head>
+<body class="memo-page">
+  <div class="nav memo-nav">
+    <div class="brand">
+      <div class="title">音声メモ</div>
+      <div class="sub" id="memoId">準備中…</div>
+    </div>
+
+    <div class="nav-center memo-context">
+      <span class="pill">カルテNo: <span id="patientId">-</span></span>
+      <span class="pill">状態: <span id="memoStatus">初期化中</span></span>
+    </div>
+
+    <div class="nav-right">
+      <div class="pill">level: <span id="level">-</span> dBFS</div>
+      <a href="/" id="btnBack" class="btn btn-sm nav-link-btn">診療画面へ戻る</a>
+    </div>
+  </div>
+
+  <main class="memo-layout">
+    <section class="card memo-card memo-asr-card">
+      <div class="hd">
+        <div>
+          <h3><span class="step-number">1</span>ASR入力</h3>
+          <div class="muted2">この欄に表示されている全文をAIへ送信します。送信前に直接編集できます。</div>
+        </div>
+        <div class="memo-card-tools">
+          <button id="btnCopyRaw" class="btn btn-sm" type="button">Copy</button>
+          <button id="btnClearAsr" class="btn btn-danger btn-sm" type="button">クリア</button>
+        </div>
+      </div>
+      <div class="memo-action-bar">
+        <button id="btnRec" class="btn btn-rec memo-rec-button" type="button" title="メモ録音を開始" aria-label="メモ録音を開始" aria-pressed="false" disabled>
+          <svg class="mic-icon" viewBox="0 0 24 24" aria-hidden="true">
+            <path d="M12 15a3 3 0 0 0 3-3V6a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a1 1 0 1 0-2 0 3 3 0 0 1-6 0 1 1 0 1 0-2 0 5 5 0 0 0 4 4.9V19H9a1 1 0 0 0 0 2h6a1 1 0 0 0 0-2h-2v-2.1A5 5 0 0 0 17 12z" />
+          </svg>
+        </button>
+        <select id="selAsrModel" class="select select-sm" aria-label="ASRモデル">
+          <option value="">ASR model...</option>
+        </select>
+        <span class="memo-action-separator" aria-hidden="true"></span>
+        <select id="selAction" class="select select-sm" aria-label="AI処理">
+          <option value="proofread">誤字脱字を修正</option>
+          <option value="polish">医療文書として清書</option>
+          <option value="referral_letter">紹介状形式に整形</option>
+        </select>
+        <select id="selLlmModel" class="select select-sm" aria-label="LLMモデル">
+          <option value="">LLM model...</option>
+        </select>
+        <button id="btnLlm" class="btn btn-primary btn-sm" type="button">現在のASRをAIに送信</button>
+      </div>
+      <div class="bd memo-editor-body">
+        <textarea id="rawTranscript" class="memo-editor raw-editor" placeholder="録音すると認識結果がここに追加されます。不要な語句は直接削除できます。"></textarea>
+      </div>
+      <div class="memo-result-actions">
+        <span class="muted2">AIを使わずに反映：</span>
+        <button id="btnReplaceMemoFromAsr" class="btn btn-primary btn-sm" type="button">メモを置き換える</button>
+        <button id="btnAppendMemoFromAsr" class="btn btn-sm" type="button">メモ末尾に追加</button>
+      </div>
+    </section>
+
+    <section class="card memo-card memo-ai-card">
+      <div class="hd">
+        <div>
+          <h3><span class="step-number">2</span>AI処理結果</h3>
+          <div class="muted2">一時的なプレビューです。確認後にメモへ反映してください。</div>
+        </div>
+        <button id="btnClearLlm" class="btn btn-sm" type="button">結果をクリア</button>
+      </div>
+      <div class="bd memo-result-body">
+        <textarea id="llmResult" class="memo-editor result-editor" readonly placeholder="AI処理結果がここに表示されます"></textarea>
+      </div>
+      <div class="memo-result-actions">
+        <button id="btnReplaceDraft" class="btn btn-primary btn-sm" type="button" disabled>メモを置き換える</button>
+        <button id="btnAppendDraft" class="btn btn-sm" type="button" disabled>メモ末尾に追加</button>
+      </div>
+    </section>
+
+    <section class="card memo-card memo-draft-card">
+      <div class="hd">
+        <div>
+          <h3><span class="step-number">3</span>メモ</h3>
+          <div class="muted2" id="saveStatus">自動保存</div>
+        </div>
+        <div class="memo-history-controls">
+          <label for="memoHistory">メモ履歴</label>
+          <select id="memoHistory" class="select select-sm" aria-label="過去のメモ" disabled>
+            <option value="">履歴を読み込み中…</option>
+          </select>
+          <button id="btnNewMemo" class="btn btn-sm" type="button" disabled>新規メモ</button>
+        </div>
+      </div>
+      <div class="memo-template-bar">
+        <select id="selTemplate" class="select select-sm" aria-label="定型文">
+          <option value="">定型文を選択...</option>
+          <option value="いつもお世話になっております。">いつもお世話になっております。</option>
+          <option value="ご高診のほど、よろしくお願い申し上げます。">ご高診のほど、よろしくお願い申し上げます。</option>
+          <option value="ご多忙のところ恐れ入りますが、何卒よろしくお願い申し上げます。">ご多忙のところ恐れ入りますが…</option>
+        </select>
+        <button id="btnInsertTemplate" class="btn btn-sm" type="button">カーソル位置に追加</button>
+        <button id="btnCopyDraft" class="btn btn-sm" type="button">Copy</button>
+      </div>
+      <div class="bd memo-editor-body">
+        <textarea id="draftText" class="memo-editor" placeholder="最終的に保存・コピーするメモです"></textarea>
+      </div>
+    </section>
+  </main>
+
+  <div id="memoToast" class="memo-toast" role="status" aria-live="polite"></div>
+  <script src="/static/memo.js?v=20260829b"></script>
+</body>
+</html>

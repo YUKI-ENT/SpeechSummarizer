@@ -8,6 +8,7 @@
   "outputs_dir": "data/sessions",
   "wav_dir": "data/wav",
   "llm_outputs_dir": "data/llm",
+  "memo_outputs_dir": "data/memo/outputs",
   "correction_rules_path": "./corrections.json",
   "wav_expire_days": 7,
   "windows_launcher": {
