@@ -1,4 +1,4 @@
-# tools/build_windows.ps1
+﻿# tools/build_windows.ps1
 # Windows build: PyInstaller (onedir) -> trim VC++ runtime DLLs -> copy assets -> zip
 # Usage:
 #   .\tools\build_windows.ps1
