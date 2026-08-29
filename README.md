@@ -30,6 +30,7 @@ SpeechSummarizer/
 ├─ _internal/
 ├─ config.json.sample
 ├─ corrections.json.sample
+├─ memo_templates.json.sample
 ├─ static/
 ├─ cert/
 └─ models/
@@ -55,7 +56,9 @@ pip install -r requirements.txt
 ※ Linux環境では、CUDAランタイムをシステムにインストールするとドライババージョンや他のアプリケーションと干渉し起動できなくなることがあるので、下記の[【補足】GPU (CUDA) 利用方法（Linux）](https://github.com/YUKI-ENT/SpeechSummarizer/edit/main/README.md#%E8%A3%9C%E8%B6%B3gpu-cuda-%E5%88%A9%E7%94%A8%E6%96%B9%E6%B3%95linux) を推奨します。
 
 ## config.jsonの設定（Windows版ではGUIから編集可能）
-インストールフォルダに有る`config.json.sample`を`config.json`に名前を変えるかコピーし、環境に合わせて編集します。`corrections.json` も初回起動時に `corrections.json.sample` から自動生成されます。
+インストールフォルダに有る`config.json.sample`を`config.json`に名前を変えるかコピーし、環境に合わせて編集します。`corrections.json` と `memo_templates.json` も初回起動時に各 `.sample` から自動生成されます。メモ定型文はWindows GUIの「メモ定型文」タブで追加・削除・並べ替え・編集できます。
+
+メモ画面の「AI送信」で使用する処理一覧とプロンプトは、`config.json` の `llm.memo_prompts` と `llm.memo_default_prompt_id` で設定します。Windows GUIの「メモAI」タブからも、追加・削除・並べ替え・既定値・本文を編集できます。プロンプト本文にはASR本文の差し込み位置として `{text}` が必要です。
 
 必須の項目は、
 - \"asr\": セクション

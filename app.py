@@ -20,6 +20,8 @@ from typing import Any, Dict, List, Optional
 from app_version import APP_VERSION
 from asr_providers import asr_model_label, create_asr_provider
 from llm_openai_compat import build_openai_base_url, list_openai_models, openai_chat_text
+from memo_ai_prompts import normalize_memo_ai_settings
+from memo_templates import load_memo_templates
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
@@ -139,10 +141,12 @@ def resolve_relpath(p: str | Path) -> Path:
 OUTPUTS_DIR = resolve_relpath(CFG.get("outputs_dir", "data/sessions"))
 WAV_DIR = resolve_relpath(CFG.get("wav_dir", "data/wav"))
 MEMO_OUTPUTS_DIR = resolve_relpath(CFG.get("memo_outputs_dir", "data/memo/outputs"))
+MEMO_TEMPLATES_PATH = resolve_relpath(CFG.get("memo_templates_path", "memo_templates.json"))
 PATIENT_DATA_PATH = resolve_relpath(CFG.get("patient_data_path", "data/patient_data.jsonl"))
 ensure_dir(OUTPUTS_DIR)
 ensure_dir(WAV_DIR)
 ensure_dir(MEMO_OUTPUTS_DIR)
+ensure_file_from_sample(MEMO_TEMPLATES_PATH)
 PATIENT_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 CORRECTION_RULES_PATH = resolve_relpath(CFG.get("correction_rules_path", "corrections.json"))
@@ -629,6 +633,11 @@ LLM_REASONING_ENABLED: Optional[bool] = (
 
 LLM_PROMPTS: Dict[str, Dict[str, Any]] = LLM_CFG.get("prompts", {})  # ★ dictのまま
 LLM_DEFAULT_PROMPT_ID = (LLM_CFG.get("default_prompt_id") or "soap_v1").strip()
+_CONFIG_SAMPLE: dict = {}
+if CONFIG_SAMPLE_PATH.exists():
+    with CONFIG_SAMPLE_PATH.open("r", encoding="utf-8") as f:
+        _CONFIG_SAMPLE = json.load(f)
+MEMO_LLM_PROMPTS, MEMO_LLM_DEFAULT_PROMPT_ID = normalize_memo_ai_settings(CFG, _CONFIG_SAMPLE)
 
 LLM_DIR = resolve_relpath(CFG.get("llm_outputs_dir", "data/llm"))
 ensure_dir(LLM_DIR)
@@ -1754,27 +1763,28 @@ async def _startup():
     cleanup_expired_wavs(CFG)
     log("[APP] startup complete")
 
-# -------------------------
-# LLM APIs
-# -------------------------
-MEMO_LLM_PROMPTS = {
-    "proofread": (
-        "以下は音声入力された医療メモです。内容や意味を変えず、誤字脱字、句読点、"
-        "明らかな音声認識の誤変換だけを修正してください。情報を追加・推測せず、修正後の本文だけを出力してください。\n\n"
-        "【メモ】\n{text}"
-    ),
-    "polish": (
-        "以下は音声入力された医療メモです。事実を追加・推測せず、内容を保ったまま、"
-        "読みやすく丁寧な医療文書として清書してください。不明な箇所は補完せず［要確認］とし、本文だけを出力してください。\n\n"
-        "【メモ】\n{text}"
-    ),
-    "referral_letter": (
-        "以下の音声入力を、診療情報提供書・紹介状の文案として整理してください。"
-        "紹介目的、傷病名、経過、所見・検査、治療内容、依頼事項を、入力に存在する範囲だけで構成してください。"
-        "情報を追加・推測せず、不足項目は［未入力］としてください。完成した本文だけを出力してください。\n\n"
-        "【音声入力】\n{text}"
-    ),
-}
+@app.get("/api/memo-templates")
+async def api_memo_templates():
+    try:
+        data = load_memo_templates(MEMO_TEMPLATES_PATH)
+    except (OSError, ValueError, json.JSONDecodeError) as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=500)
+    return {
+        "ok": True,
+        "templates": [item for item in data["templates"] if item["enabled"]],
+    }
+
+
+@app.get("/api/memo-ai-prompts")
+async def api_memo_ai_prompts():
+    return {
+        "ok": True,
+        "default_prompt_id": MEMO_LLM_DEFAULT_PROMPT_ID,
+        "prompts": [
+            {"id": prompt_id, "label": meta["label"]}
+            for prompt_id, meta in MEMO_LLM_PROMPTS.items()
+        ],
+    }
 
 
 @app.post("/api/memos")
@@ -1866,11 +1876,13 @@ async def api_memo_save_draft(memo_id: str, payload: Dict[str, Any] = Body(...))
 
 @app.post("/api/memos/{memo_id}/llm")
 async def api_memo_llm(memo_id: str, payload: Dict[str, Any] = Body(...)):
-    action = str(payload.get("action") or "proofread").strip()
+    prompt_id = str(
+        payload.get("prompt_id") or payload.get("action") or MEMO_LLM_DEFAULT_PROMPT_ID
+    ).strip()
     source_text = payload.get("text")
     model = str(payload.get("model") or LLM_MODEL_DEFAULT).strip() or LLM_MODEL_DEFAULT
-    if action not in MEMO_LLM_PROMPTS:
-        return JSONResponse({"ok": False, "error": "unknown action"}, status_code=400)
+    if prompt_id not in MEMO_LLM_PROMPTS:
+        return JSONResponse({"ok": False, "error": "unknown memo AI prompt"}, status_code=400)
     if not isinstance(source_text, str) or not source_text.strip():
         return JSONResponse({"ok": False, "error": "text required"}, status_code=400)
     if len(source_text) > 50000:
@@ -1880,7 +1892,7 @@ async def api_memo_llm(memo_id: str, payload: Dict[str, Any] = Body(...)):
     except (ValueError, FileNotFoundError) as e:
         return JSONResponse({"ok": False, "error": str(e)}, status_code=404)
 
-    prompt = MEMO_LLM_PROMPTS[action].replace("{text}", source_text.strip())
+    prompt = MEMO_LLM_PROMPTS[prompt_id]["template"].replace("{text}", source_text.strip())
     t0 = time.time()
     try:
         result = generate_llm_text(
@@ -1892,7 +1904,7 @@ async def api_memo_llm(memo_id: str, payload: Dict[str, Any] = Body(...)):
         )
         result = strip_thinking_from_response(result).strip()
         return {
-            "ok": True, "text": result, "action": action, "model": model,
+            "ok": True, "text": result, "prompt_id": prompt_id, "action": prompt_id, "model": model,
             "elapsed_sec": round(time.time() - t0, 3),
         }
     except Exception as e:

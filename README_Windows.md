@@ -213,6 +213,7 @@ dist\
    ├─ _internal\
    ├─ config.json.sample
    ├─ corrections.json.sample
+   ├─ memo_templates.json.sample
    ├─ static\
    ├─ certs\
    └─ models\                 # IncludeModelsがtrueの場合
@@ -228,6 +229,10 @@ release\
 `config.json.sample` を基に作成されるため、更新版を上書き展開しても利用者の設定を
 不用意に置き換えない構成になっています。
 
+`memo_templates.json` も配布物には含めず、初回起動時に
+`memo_templates.json.sample` から作成します。Windows GUIの「メモ定型文」タブで、
+表示名・本文・有効/無効・表示順を設定できます。
+
 LLM設定はWindows GUIの「LLM」タブで、サーバー（IP/ホスト名）、
 Port、HTTPS、モデル名、API Keyを個別に指定できます。Ollamaの標準例は
 `127.0.0.1` / `11434` / HTTPSオフです。旧`base_url`設定はGUIで読み込み、保存時に
@@ -236,6 +241,11 @@ Port、HTTPS、モデル名、API Keyを個別に指定できます。Ollamaの�
 同じ「LLM」タブの「Reasoningを有効にする（OFF推奨）」で、LLMのreasoningを
 切り替えられます。OFFでは`reasoning_effort: "none"`、ONでは
 `reasoning_effort: "medium"`をOpenAI互換APIへ送信します。変更は設定保存後、
+SpeechSummarizerサーバーを再起動すると反映されます。
+
+メモ画面の「AI送信」で使用するプロンプトは「メモAI」タブで設定できます。
+プロンプトの追加・削除・並べ替え、既定プロンプト、表示名、本文を編集でき、
+本文にはASR入力を差し込む `{text}` が必要です。変更は設定保存後、
 SpeechSummarizerサーバーを再起動すると反映されます。
 
 ## ビルド時の注意

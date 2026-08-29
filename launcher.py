@@ -6,6 +6,7 @@ import subprocess
 import sys
 import threading
 import time
+import uuid
 import webbrowser
 from pathlib import Path
 from urllib.parse import urlparse
@@ -20,6 +21,8 @@ from launcher_helpers import (
     fetch_asr_ready_status,
     resolve_launcher_path,
 )
+from memo_ai_prompts import normalize_memo_ai_settings
+from memo_templates import load_memo_templates, save_memo_templates
 
 
 def get_app_dir() -> Path:
@@ -36,11 +39,13 @@ PATH_KEYS = {
     ("outputs_dir",),
     ("wav_dir",),
     ("llm_outputs_dir",),
+    ("memo_templates_path",),
     ("ssl", "certfile"),
     ("ssl", "keyfile"),
 }
 MODEL_PATH_PREFIX = ("asr", "models")
 FIELD_DEFAULTS = {
+    "memo_templates_path": "./memo_templates.json",
     "asr_provider": "whisper",
     "qwen_base_url": "http://127.0.0.1:8010",
     "qwen_timeout": 35,
@@ -87,6 +92,13 @@ def save_config(cfg: dict) -> None:
         f.write("\n")
 
 
+def load_config_sample() -> dict:
+    if not CONFIG_SAMPLE_PATH.exists():
+        return {}
+    with CONFIG_SAMPLE_PATH.open("r", encoding="utf-8") as f:
+        return json.load(f)
+
+
 def get_nested(cfg: dict, path: tuple[str, ...], default=None):
     cur = cfg
     for key in path:
@@ -109,6 +121,25 @@ def set_nested(cfg: dict, path: tuple[str, ...], value) -> None:
 
 def normalize_path_text(value: str) -> str:
     return value.replace("\\", "/").strip()
+
+
+def get_memo_templates_path(cfg: dict) -> Path:
+    configured = Path(str(cfg.get("memo_templates_path") or "memo_templates.json"))
+    return configured if configured.is_absolute() else APP_DIR / configured
+
+
+def ensure_memo_templates_file(cfg: dict) -> Path:
+    path = get_memo_templates_path(cfg)
+    if path.exists():
+        return path
+    sample_path = path.with_name(f"{path.name}.sample")
+    if not sample_path.exists() and path.name == "memo_templates.json":
+        sample_path = APP_DIR / "memo_templates.json.sample"
+    if not sample_path.exists():
+        raise FileNotFoundError(f"memo templates file not found: {path}")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(sample_path, path)
+    return path
 
 
 class ScrollableTab(ttk.Frame):
@@ -182,6 +213,12 @@ class LauncherApp:
         self.field_meta: dict[str, dict] = {}
         self.model_rows: list[tuple[tk.StringVar, tk.StringVar]] = []
         self.prompt_rows: list[tuple[tk.StringVar, tk.StringVar, ScrolledText]] = []
+        self.memo_ai_prompts: list[dict[str, str]] = []
+        self.memo_ai_selected_index: int | None = None
+        self._memo_ai_selection_changing = False
+        self.memo_templates: list[dict] = []
+        self.memo_template_selected_index: int | None = None
+        self._memo_template_selection_changing = False
         self._auto_start_attempted = False
         self._cancel_start = threading.Event()
         self._qwen_status_checking = False
@@ -250,14 +287,20 @@ class LauncherApp:
         general_tab = ScrollableTab(notebook, padding=12)
         asr_tab = ScrollableTab(notebook, padding=12)
         llm_tab = ScrollableTab(notebook, padding=12)
+        memo_ai_tab = ScrollableTab(notebook, padding=12)
+        memo_templates_tab = ScrollableTab(notebook, padding=12)
 
         notebook.add(general_tab, text="一般")
         notebook.add(asr_tab, text="ASR")
         notebook.add(llm_tab, text="LLM")
+        notebook.add(memo_ai_tab, text="メモAI")
+        notebook.add(memo_templates_tab, text="メモ定型文")
 
         self._build_general_tab(general_tab.content)
         self._build_asr_tab(asr_tab.content)
         self._build_llm_tab(llm_tab.content)
+        self._build_memo_ai_tab(memo_ai_tab.content)
+        self._build_memo_templates_tab(memo_templates_tab.content)
         self._build_log_panel(lower)
 
     def _build_general_tab(self, parent: ttk.Frame) -> None:
@@ -580,6 +623,315 @@ class LauncherApp:
         self.log_text.pack(fill="both", expand=True)
         self.log_text.configure(state="disabled")
 
+    def _build_memo_ai_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(0, weight=1)
+        parent.rowconfigure(2, weight=1)
+
+        settings = ttk.Frame(parent)
+        settings.grid(row=0, column=0, sticky="we", pady=(0, 8))
+        ttk.Label(settings, text="既定Prompt ID").pack(side="left", padx=(0, 8))
+        self.memo_ai_default_var = tk.StringVar()
+        self.memo_ai_default_box = ttk.Combobox(
+            settings, textvariable=self.memo_ai_default_var, state="readonly", width=28
+        )
+        self.memo_ai_default_box.pack(side="left")
+        self.memo_ai_default_box.bind("<<ComboboxSelected>>", self._on_memo_ai_default_changed)
+        ttk.Label(
+            parent,
+            text="{text} がASR本文の差し込み位置です。変更は設定保存後、サーバーを再起動すると反映されます。",
+        ).grid(row=1, column=0, sticky="w", pady=(0, 10))
+
+        body = ttk.Frame(parent)
+        body.grid(row=2, column=0, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=3)
+        body.rowconfigure(0, weight=1)
+
+        list_box = ttk.LabelFrame(body, text="メモAIプロンプト一覧", padding=10)
+        list_box.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        list_box.columnconfigure(0, weight=1)
+        list_box.rowconfigure(0, weight=1)
+        self.memo_ai_list = tk.Listbox(list_box, exportselection=False, height=18)
+        self.memo_ai_list.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(list_box, orient="vertical", command=self.memo_ai_list.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.memo_ai_list.configure(yscrollcommand=scrollbar.set)
+        self.memo_ai_list.bind("<<ListboxSelect>>", self._on_memo_ai_selected)
+
+        buttons = ttk.Frame(list_box)
+        buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(buttons, text="追加", command=self.add_memo_ai_prompt).pack(side="left")
+        ttk.Button(buttons, text="削除", command=self.delete_memo_ai_prompt).pack(side="left", padx=(6, 0))
+        ttk.Button(buttons, text="↑", width=4, command=lambda: self.move_memo_ai_prompt(-1)).pack(side="left", padx=(12, 0))
+        ttk.Button(buttons, text="↓", width=4, command=lambda: self.move_memo_ai_prompt(1)).pack(side="left", padx=(4, 0))
+
+        editor = ttk.LabelFrame(body, text="選択中のプロンプト", padding=10)
+        editor.grid(row=0, column=1, sticky="nsew")
+        editor.columnconfigure(1, weight=1)
+        editor.rowconfigure(2, weight=1)
+        ttk.Label(editor, text="Prompt ID").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
+        self.memo_ai_id_var = tk.StringVar()
+        self.memo_ai_id_entry = ttk.Entry(editor, textvariable=self.memo_ai_id_var)
+        self.memo_ai_id_entry.grid(row=0, column=1, sticky="we", pady=(0, 8))
+        ttk.Label(editor, text="表示名").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
+        self.memo_ai_label_var = tk.StringVar()
+        self.memo_ai_label_entry = ttk.Entry(editor, textvariable=self.memo_ai_label_var)
+        self.memo_ai_label_entry.grid(row=1, column=1, sticky="we", pady=(0, 8))
+        ttk.Label(editor, text="プロンプト本文").grid(row=2, column=0, sticky="nw", padx=(0, 8))
+        self.memo_ai_template_text = ScrolledText(editor, height=14, wrap="word")
+        self.memo_ai_template_text.grid(row=2, column=1, sticky="nsew")
+        self._set_memo_ai_editor_enabled(False)
+
+    def _set_memo_ai_editor_enabled(self, enabled: bool) -> None:
+        state = ["!disabled"] if enabled else ["disabled"]
+        self.memo_ai_id_entry.state(state)
+        self.memo_ai_label_entry.state(state)
+        self.memo_ai_template_text.configure(state="normal" if enabled else "disabled")
+
+    def _commit_memo_ai_editor(self) -> None:
+        index = self.memo_ai_selected_index
+        if index is None or not 0 <= index < len(self.memo_ai_prompts):
+            return
+        item = self.memo_ai_prompts[index]
+        old_id = item["id"]
+        new_id = self.memo_ai_id_var.get().strip()
+        item["id"] = new_id
+        item["label"] = self.memo_ai_label_var.get().strip()
+        item["template"] = self.memo_ai_template_text.get("1.0", "end").strip()
+        if self.memo_ai_default_var.get() == old_id:
+            self.memo_ai_default_var.set(new_id)
+
+    def _show_memo_ai_prompt(self, index: int | None) -> None:
+        self.memo_ai_selected_index = index
+        enabled = index is not None and 0 <= index < len(self.memo_ai_prompts)
+        self._set_memo_ai_editor_enabled(enabled)
+        self.memo_ai_id_var.set("")
+        self.memo_ai_label_var.set("")
+        if not enabled:
+            self.memo_ai_template_text.configure(state="normal")
+            self.memo_ai_template_text.delete("1.0", "end")
+            self.memo_ai_template_text.configure(state="disabled")
+            return
+        item = self.memo_ai_prompts[index]
+        self.memo_ai_id_var.set(item["id"])
+        self.memo_ai_label_var.set(item["label"])
+        self.memo_ai_template_text.delete("1.0", "end")
+        self.memo_ai_template_text.insert("1.0", item["template"])
+
+    def _refresh_memo_ai_list(self, selected_index: int | None = None) -> None:
+        self._memo_ai_selection_changing = True
+        try:
+            self.memo_ai_list.delete(0, "end")
+            default_id = self.memo_ai_default_var.get()
+            prompt_ids = []
+            for item in self.memo_ai_prompts:
+                prompt_id = item.get("id", "")
+                prompt_ids.append(prompt_id)
+                prefix = "[既定] " if prompt_id == default_id else ""
+                self.memo_ai_list.insert("end", f"{prefix}{item.get('label') or prompt_id}")
+            self.memo_ai_default_box.configure(values=prompt_ids)
+            if selected_index is not None and 0 <= selected_index < len(self.memo_ai_prompts):
+                self.memo_ai_list.selection_set(selected_index)
+                self.memo_ai_list.see(selected_index)
+            else:
+                selected_index = None
+        finally:
+            self._memo_ai_selection_changing = False
+        self._show_memo_ai_prompt(selected_index)
+
+    def _on_memo_ai_selected(self, _event=None) -> None:
+        if self._memo_ai_selection_changing:
+            return
+        selection = self.memo_ai_list.curselection()
+        new_index = int(selection[0]) if selection else None
+        self._commit_memo_ai_editor()
+        self._refresh_memo_ai_list(new_index)
+
+    def _on_memo_ai_default_changed(self, _event=None) -> None:
+        if self._memo_ai_selection_changing:
+            return
+        self._commit_memo_ai_editor()
+        self._refresh_memo_ai_list(self.memo_ai_selected_index)
+
+    def add_memo_ai_prompt(self) -> None:
+        self._commit_memo_ai_editor()
+        prompt_id = f"memo_prompt_{uuid.uuid4().hex[:12]}"
+        self.memo_ai_prompts.append({
+            "id": prompt_id,
+            "label": "新しいAI処理",
+            "template": "以下のメモを処理してください。\n\n{text}",
+        })
+        if not self.memo_ai_default_var.get():
+            self.memo_ai_default_var.set(prompt_id)
+        self._refresh_memo_ai_list(len(self.memo_ai_prompts) - 1)
+        self.memo_ai_label_entry.focus_set()
+        self.memo_ai_label_entry.selection_range(0, "end")
+
+    def delete_memo_ai_prompt(self) -> None:
+        index = self.memo_ai_selected_index
+        if index is None:
+            return
+        deleted_id = self.memo_ai_prompts[index]["id"]
+        del self.memo_ai_prompts[index]
+        if self.memo_ai_default_var.get() == deleted_id:
+            self.memo_ai_default_var.set(self.memo_ai_prompts[0]["id"] if self.memo_ai_prompts else "")
+        next_index = min(index, len(self.memo_ai_prompts) - 1) if self.memo_ai_prompts else None
+        self._refresh_memo_ai_list(next_index)
+
+    def move_memo_ai_prompt(self, offset: int) -> None:
+        index = self.memo_ai_selected_index
+        if index is None:
+            return
+        target = index + offset
+        if not 0 <= target < len(self.memo_ai_prompts):
+            return
+        self._commit_memo_ai_editor()
+        self.memo_ai_prompts[index], self.memo_ai_prompts[target] = self.memo_ai_prompts[target], self.memo_ai_prompts[index]
+        self._refresh_memo_ai_list(target)
+
+    def _build_memo_templates_tab(self, parent: ttk.Frame) -> None:
+        parent.columnconfigure(1, weight=1)
+        parent.rowconfigure(2, weight=1)
+
+        self._add_path_entry(
+            parent,
+            "memo_templates_path",
+            "定型文ファイル",
+            ("memo_templates_path",),
+            row=0,
+            select="file",
+        )
+        ttk.Label(
+            parent,
+            text="一覧の順番がメモ画面の表示順になります。設定保存後、メモ画面を再読み込みすると反映されます。",
+        ).grid(row=1, column=0, columnspan=3, sticky="w", pady=(0, 10))
+
+        body = ttk.Frame(parent)
+        body.grid(row=2, column=0, columnspan=3, sticky="nsew")
+        body.columnconfigure(0, weight=1)
+        body.columnconfigure(1, weight=3)
+        body.rowconfigure(0, weight=1)
+
+        list_box = ttk.LabelFrame(body, text="定型文一覧", padding=10)
+        list_box.grid(row=0, column=0, sticky="nsew", padx=(0, 10))
+        list_box.columnconfigure(0, weight=1)
+        list_box.rowconfigure(0, weight=1)
+        self.memo_template_list = tk.Listbox(list_box, exportselection=False, height=18)
+        self.memo_template_list.grid(row=0, column=0, sticky="nsew")
+        scrollbar = ttk.Scrollbar(list_box, orient="vertical", command=self.memo_template_list.yview)
+        scrollbar.grid(row=0, column=1, sticky="ns")
+        self.memo_template_list.configure(yscrollcommand=scrollbar.set)
+        self.memo_template_list.bind("<<ListboxSelect>>", self._on_memo_template_selected)
+
+        list_buttons = ttk.Frame(list_box)
+        list_buttons.grid(row=1, column=0, columnspan=2, sticky="w", pady=(8, 0))
+        ttk.Button(list_buttons, text="追加", command=self.add_memo_template).pack(side="left")
+        ttk.Button(list_buttons, text="削除", command=self.delete_memo_template).pack(side="left", padx=(6, 0))
+        ttk.Button(list_buttons, text="↑", width=4, command=lambda: self.move_memo_template(-1)).pack(side="left", padx=(12, 0))
+        ttk.Button(list_buttons, text="↓", width=4, command=lambda: self.move_memo_template(1)).pack(side="left", padx=(4, 0))
+
+        editor = ttk.LabelFrame(body, text="選択中の定型文", padding=10)
+        editor.grid(row=0, column=1, sticky="nsew")
+        editor.columnconfigure(1, weight=1)
+        editor.rowconfigure(2, weight=1)
+        self.memo_template_enabled_var = tk.BooleanVar(value=True)
+        self.memo_template_enabled_check = ttk.Checkbutton(
+            editor, text="メモ画面に表示する", variable=self.memo_template_enabled_var
+        )
+        self.memo_template_enabled_check.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 8))
+        ttk.Label(editor, text="表示名").grid(row=1, column=0, sticky="w", padx=(0, 8), pady=(0, 8))
+        self.memo_template_label_var = tk.StringVar()
+        self.memo_template_label_entry = ttk.Entry(editor, textvariable=self.memo_template_label_var)
+        self.memo_template_label_entry.grid(row=1, column=1, sticky="we", pady=(0, 8))
+        ttk.Label(editor, text="本文").grid(row=2, column=0, sticky="nw", padx=(0, 8))
+        self.memo_template_text = ScrolledText(editor, height=14, wrap="word")
+        self.memo_template_text.grid(row=2, column=1, sticky="nsew")
+        self._set_memo_template_editor_enabled(False)
+
+    def _set_memo_template_editor_enabled(self, enabled: bool) -> None:
+        self.memo_template_enabled_check.state(["!disabled"] if enabled else ["disabled"])
+        self.memo_template_label_entry.state(["!disabled"] if enabled else ["disabled"])
+        self.memo_template_text.configure(state="normal" if enabled else "disabled")
+
+    def _commit_memo_template_editor(self) -> None:
+        index = self.memo_template_selected_index
+        if index is None or not 0 <= index < len(self.memo_templates):
+            return
+        self.memo_templates[index]["label"] = self.memo_template_label_var.get().strip()
+        self.memo_templates[index]["text"] = self.memo_template_text.get("1.0", "end").strip()
+        self.memo_templates[index]["enabled"] = bool(self.memo_template_enabled_var.get())
+
+    def _show_memo_template(self, index: int | None) -> None:
+        self.memo_template_selected_index = index
+        enabled = index is not None and 0 <= index < len(self.memo_templates)
+        self._set_memo_template_editor_enabled(enabled)
+        self.memo_template_label_var.set("")
+        if not enabled:
+            self.memo_template_text.configure(state="normal")
+            self.memo_template_text.delete("1.0", "end")
+            self.memo_template_text.configure(state="disabled")
+            return
+        item = self.memo_templates[index]
+        self.memo_template_enabled_var.set(bool(item.get("enabled", True)))
+        self.memo_template_label_var.set(str(item.get("label", "")))
+        self.memo_template_text.delete("1.0", "end")
+        self.memo_template_text.insert("1.0", str(item.get("text", "")))
+
+    def _refresh_memo_template_list(self, selected_index: int | None = None) -> None:
+        self._memo_template_selection_changing = True
+        try:
+            self.memo_template_list.delete(0, "end")
+            for item in self.memo_templates:
+                prefix = "" if item.get("enabled", True) else "[非表示] "
+                self.memo_template_list.insert("end", f"{prefix}{item.get('label') or item.get('id')}")
+            if selected_index is not None and 0 <= selected_index < len(self.memo_templates):
+                self.memo_template_list.selection_set(selected_index)
+                self.memo_template_list.see(selected_index)
+            else:
+                selected_index = None
+        finally:
+            self._memo_template_selection_changing = False
+        self._show_memo_template(selected_index)
+
+    def _on_memo_template_selected(self, _event=None) -> None:
+        if self._memo_template_selection_changing:
+            return
+        selection = self.memo_template_list.curselection()
+        new_index = int(selection[0]) if selection else None
+        self._commit_memo_template_editor()
+        self._refresh_memo_template_list(new_index)
+
+    def add_memo_template(self) -> None:
+        self._commit_memo_template_editor()
+        self.memo_templates.append({
+            "id": f"template_{uuid.uuid4().hex[:12]}",
+            "label": "新しい定型文",
+            "text": "",
+            "enabled": True,
+        })
+        self._refresh_memo_template_list(len(self.memo_templates) - 1)
+        self.memo_template_label_entry.focus_set()
+        self.memo_template_label_entry.selection_range(0, "end")
+
+    def delete_memo_template(self) -> None:
+        index = self.memo_template_selected_index
+        if index is None:
+            return
+        del self.memo_templates[index]
+        next_index = min(index, len(self.memo_templates) - 1) if self.memo_templates else None
+        self._refresh_memo_template_list(next_index)
+
+    def move_memo_template(self, offset: int) -> None:
+        index = self.memo_template_selected_index
+        if index is None:
+            return
+        target = index + offset
+        if not 0 <= target < len(self.memo_templates):
+            return
+        self._commit_memo_template_editor()
+        self.memo_templates[index], self.memo_templates[target] = self.memo_templates[target], self.memo_templates[index]
+        self._refresh_memo_template_list(target)
+
     def _add_entry(self, parent, name: str, label: str, path: tuple[str, ...], kind: str, row: int, col: int = 0, width: int = 24, show: str = "") -> None:
         var = tk.StringVar()
         self.vars[name] = var
@@ -742,6 +1094,33 @@ class LauncherApp:
             self.prompt_rows[idx][1].set("")
             self.prompt_rows[idx][2].delete("1.0", "end")
 
+        try:
+            memo_ai_prompts, memo_ai_default_id = normalize_memo_ai_settings(
+                self.cfg, load_config_sample()
+            )
+            self.memo_ai_prompts = [
+                {"id": prompt_id, "label": meta["label"], "template": meta["template"]}
+                for prompt_id, meta in memo_ai_prompts.items()
+            ]
+            self.memo_ai_default_var.set(memo_ai_default_id)
+            self._refresh_memo_ai_list(0 if self.memo_ai_prompts else None)
+        except Exception as e:
+            self.memo_ai_prompts = []
+            self.memo_ai_default_var.set("")
+            self._refresh_memo_ai_list()
+            messagebox.showerror("メモAI設定読込エラー", str(e), parent=self.root)
+
+        try:
+            templates_path = ensure_memo_templates_file(self.cfg)
+            templates_data = load_memo_templates(templates_path)
+            self.memo_templates = [dict(item) for item in templates_data["templates"]]
+            selected_index = 0 if self.memo_templates else None
+            self._refresh_memo_template_list(selected_index)
+        except Exception as e:
+            self.memo_templates = []
+            self._refresh_memo_template_list()
+            messagebox.showerror("定型文読込エラー", str(e), parent=self.root)
+
     def reload_form(self) -> None:
         self._load_form_from_config()
         self._update_asr_provider_ui()
@@ -841,6 +1220,8 @@ class LauncherApp:
     def save_form(self) -> bool:
         cfg = load_config()
         try:
+            self._commit_memo_ai_editor()
+            self._commit_memo_template_editor()
             for name, field in self.field_meta.items():
                 path = field["path"]
                 kind = field["kind"]
@@ -925,8 +1306,31 @@ class LauncherApp:
             if default_prompt_id not in prompts:
                 raise ValueError("llm.default_prompt_id が llm.prompts に存在しません。")
 
+            memo_ai_prompts: dict[str, dict[str, str]] = {}
+            for item in self.memo_ai_prompts:
+                prompt_id = str(item.get("id") or "").strip()
+                if not prompt_id:
+                    raise ValueError("メモAI prompt の Prompt ID は必須です。")
+                if prompt_id in memo_ai_prompts:
+                    raise ValueError(f"メモAI prompt の Prompt ID が重複しています: {prompt_id}")
+                memo_ai_prompts[prompt_id] = {
+                    "label": str(item.get("label") or "").strip(),
+                    "template": str(item.get("template") or "").strip(),
+                }
+            set_nested(cfg, ("llm", "memo_prompts"), memo_ai_prompts)
+            set_nested(cfg, ("llm", "memo_default_prompt_id"), self.memo_ai_default_var.get().strip())
+            normalize_memo_ai_settings(cfg)
+
+            templates_path = get_memo_templates_path(cfg)
+            save_memo_templates(templates_path, {
+                "version": 1,
+                "templates": self.memo_templates,
+            })
             save_config(cfg)
             self.cfg = cfg
+            self._refresh_memo_ai_list(self.memo_ai_selected_index)
+            self._refresh_memo_template_list(self.memo_template_selected_index)
+            self._append_log(f"[launcher] memo templates saved: {templates_path.name}")
             self._append_log(f"[launcher] config saved: {CONFIG_PATH.name}")
             return True
         except Exception as e:

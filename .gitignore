@@ -16,6 +16,7 @@ models/
 *.txt
 /config.json
 /corrections.json
+/memo_templates.json
 
 # PyInstaller build artifacts
 /build/

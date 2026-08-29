@@ -149,6 +149,45 @@
     } catch (_) { /* The API reports the error when AI processing is requested. */ }
   }
 
+  async function loadMemoTemplates() {
+    try {
+      const data = await fetchJson('/api/memo-templates');
+      const templates = data.templates || [];
+      const placeholder = {
+        text: '',
+        label: templates.length ? '定型文を選択...' : '有効な定型文がありません'
+      };
+      setSelectOptions(
+        selTemplate,
+        [placeholder, ...templates],
+        item => item.text,
+        item => item.label
+      );
+      selTemplate.disabled = !templates.length;
+      btnInsertTemplate.disabled = !templates.length;
+    } catch (_) {
+      setSelectOptions(selTemplate, [{ value: '', label: '定型文を読み込めません' }], item => item.value, item => item.label);
+      selTemplate.disabled = true;
+      btnInsertTemplate.disabled = true;
+    }
+  }
+
+  async function loadMemoAiPrompts() {
+    try {
+      const data = await fetchJson('/api/memo-ai-prompts');
+      const prompts = data.prompts || [];
+      setSelectOptions(selAction, prompts, item => item.id, item => item.label || item.id);
+      if (!prompts.length) throw new Error('AI処理プロンプトがありません');
+      selAction.value = data.default_prompt_id || prompts[0].id;
+      selAction.disabled = false;
+      btnLlm.disabled = false;
+    } catch (_) {
+      setSelectOptions(selAction, [{ id: '', label: 'AI処理を読み込めません' }], item => item.id, item => item.label);
+      selAction.disabled = true;
+      btnLlm.disabled = true;
+    }
+  }
+
   function handleWsMessage(event) {
     let message;
     try { message = JSON.parse(event.data); } catch (_) { return; }
@@ -388,6 +427,10 @@
       toast('ASR入力が空です');
       return;
     }
+    if (!selAction.value) {
+      toast('AI処理を選択してください');
+      return;
+    }
     btnLlm.disabled = true;
     btnReplaceDraft.disabled = true;
     btnAppendDraft.disabled = true;
@@ -396,17 +439,17 @@
       const result = await fetchJson(`/api/memos/${encodeURIComponent(memoId)}/llm`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: selAction.value, model: selLlmModel.value, text: source })
+        body: JSON.stringify({ prompt_id: selAction.value, model: selLlmModel.value, text: source })
       });
       llmResultEl.value = result.text || '';
       sessionStorage.setItem(storageKey('llm'), llmResultEl.value);
-      toast('現在のASRをAIへ送信しました');
+      toast('AI送信しました');
     } catch (error) {
       llmResultEl.value = '';
       sessionStorage.removeItem(storageKey('llm'));
       toast(`AI処理エラー: ${error.message || error}`);
     } finally {
-      btnLlm.disabled = false;
+      btnLlm.disabled = selAction.disabled;
       renderLlmActions();
     }
   }
@@ -552,7 +595,7 @@
   (async () => {
     try {
       await createOrLoadMemo();
-      await Promise.all([loadModels(), loadMemoHistory()]);
+      await Promise.all([loadModels(), loadMemoHistory(), loadMemoTemplates(), loadMemoAiPrompts()]);
       btnRec.disabled = false;
       btnNewMemo.disabled = false;
       setStatus('入力待ち');

@@ -1,0 +1,23 @@
+{
+  "version": 1,
+  "templates": [
+    {
+      "id": "greeting",
+      "label": "いつもお世話になっております。",
+      "text": "いつもお世話になっております。",
+      "enabled": true
+    },
+    {
+      "id": "consultation",
+      "label": "ご高診のお願い",
+      "text": "ご高診のほど、よろしくお願い申し上げます。",
+      "enabled": true
+    },
+    {
+      "id": "closing",
+      "label": "ご多忙のところ…",
+      "text": "ご多忙のところ恐れ入りますが、何卒よろしくお願い申し上げます。",
+      "enabled": true
+    }
+  ]
+}

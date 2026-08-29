@@ -1,4 +1,4 @@
-﻿# tools/build_windows.ps1
+# tools/build_windows.ps1
 # Windows build: PyInstaller (onedir) -> trim VC++ runtime DLLs -> copy assets -> zip
 # Usage:
 #   .\tools\build_windows.ps1
@@ -163,6 +163,7 @@ try {
   $itemsToCopy = @(
     "config.json.sample",
     "corrections.json.sample",
+    "memo_templates.json.sample",
     "static",
     "certs"
   )
@@ -172,9 +173,14 @@ try {
   # Do not ship config.json. The app creates it from config.json.sample
   # only when missing, so user settings are not overwritten on upgrade.
   $packagedConfig = Join-Path $AppDir "config.json"
+  $packagedMemoTemplates = Join-Path $AppDir "memo_templates.json"
   if (Test-Path $packagedConfig) {
     Remove-Item $packagedConfig -Force
     Write-Host "[pack] removed: config.json"
+  }
+  if (Test-Path $packagedMemoTemplates) {
+    Remove-Item $packagedMemoTemplates -Force
+    Write-Host "[pack] removed: memo_templates.json"
   }
 
   foreach ($it in $itemsToCopy) {
@@ -205,6 +211,10 @@ try {
   if (Test-Path $packagedConfig) {
     Remove-Item $packagedConfig -Force
     Write-Host "[check] removed config.json created by import check"
+  }
+  if (Test-Path $packagedMemoTemplates) {
+    Remove-Item $packagedMemoTemplates -Force
+    Write-Host "[check] removed memo_templates.json created by import check"
   }
 
   if (!(Test-Path $OutDir)) { New-Item -ItemType Directory -Path $OutDir | Out-Null }

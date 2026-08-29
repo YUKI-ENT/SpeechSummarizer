@@ -48,15 +48,13 @@
           <option value="">ASR model...</option>
         </select>
         <span class="memo-action-separator" aria-hidden="true"></span>
-        <select id="selAction" class="select select-sm" aria-label="AI処理">
-          <option value="proofread">誤字脱字を修正</option>
-          <option value="polish">医療文書として清書</option>
-          <option value="referral_letter">紹介状形式に整形</option>
+        <select id="selAction" class="select select-sm" aria-label="AI処理" disabled>
+          <option value="">AI処理を読み込み中...</option>
         </select>
         <select id="selLlmModel" class="select select-sm" aria-label="LLMモデル">
           <option value="">LLM model...</option>
         </select>
-        <button id="btnLlm" class="btn btn-primary btn-sm" type="button">現在のASRをAIに送信</button>
+        <button id="btnLlm" class="btn btn-primary btn-sm" type="button" disabled>AI送信</button>
       </div>
       <div class="bd memo-editor-body">
         <textarea id="rawTranscript" class="memo-editor raw-editor" placeholder="録音すると認識結果がここに追加されます。不要な語句は直接削除できます。"></textarea>
@@ -101,10 +99,7 @@
       </div>
       <div class="memo-template-bar">
         <select id="selTemplate" class="select select-sm" aria-label="定型文">
-          <option value="">定型文を選択...</option>
-          <option value="いつもお世話になっております。">いつもお世話になっております。</option>
-          <option value="ご高診のほど、よろしくお願い申し上げます。">ご高診のほど、よろしくお願い申し上げます。</option>
-          <option value="ご多忙のところ恐れ入りますが、何卒よろしくお願い申し上げます。">ご多忙のところ恐れ入りますが…</option>
+          <option value="">定型文を読み込み中...</option>
         </select>
         <button id="btnInsertTemplate" class="btn btn-sm" type="button">カーソル位置に追加</button>
         <button id="btnCopyDraft" class="btn btn-sm" type="button">Copy</button>
@@ -116,6 +111,6 @@
   </main>
 
   <div id="memoToast" class="memo-toast" role="status" aria-live="polite"></div>
-  <script src="/static/memo.js?v=20260829b"></script>
+  <script src="/static/memo.js?v=20260829d"></script>
 </body>
 </html>

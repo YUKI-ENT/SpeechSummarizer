@@ -13,6 +13,58 @@ import app as app_module
 
 
 class MemoTargetTests(unittest.IsolatedAsyncioTestCase):
+    async def test_memo_ai_prompts_api_returns_order_and_default(self):
+        prompts = {
+            "first": {"label": "1番目", "template": "一つ目\n{text}"},
+            "second": {"label": "2番目", "template": "二つ目\n{text}"},
+        }
+        with (
+            patch.object(app_module, "MEMO_LLM_PROMPTS", prompts),
+            patch.object(app_module, "MEMO_LLM_DEFAULT_PROMPT_ID", "second"),
+        ):
+            result = await app_module.api_memo_ai_prompts()
+
+        self.assertEqual([item["id"] for item in result["prompts"]], ["first", "second"])
+        self.assertEqual(result["default_prompt_id"], "second")
+
+    async def test_memo_llm_uses_configured_prompt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            outputs = Path(tmp) / "outputs"
+            outputs.mkdir()
+            prompts = {
+                "configured": {"label": "設定値", "template": "設定済みプロンプト\n{text}"},
+            }
+            with (
+                patch.object(app_module, "MEMO_OUTPUTS_DIR", outputs),
+                patch.object(app_module, "MEMO_LLM_PROMPTS", prompts),
+                patch.object(app_module, "MEMO_LLM_DEFAULT_PROMPT_ID", "configured"),
+                patch.object(app_module, "generate_llm_text", return_value="処理結果") as generate,
+            ):
+                created = await app_module.api_memo_create({"patient_id": "123456"})
+                result = await app_module.api_memo_llm(created["memo"]["id"], {
+                    "prompt_id": "configured",
+                    "text": "ASR本文",
+                })
+
+            self.assertEqual(result["text"], "処理結果")
+            self.assertEqual(result["prompt_id"], "configured")
+            self.assertEqual(generate.call_args.kwargs["prompt"], "設定済みプロンプト\nASR本文")
+
+    async def test_memo_templates_api_returns_only_enabled_items(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            templates_path = Path(tmp) / "memo_templates.json"
+            templates_path.write_text(json.dumps({
+                "version": 1,
+                "templates": [
+                    {"id": "shown", "label": "表示", "text": "表示本文", "enabled": True},
+                    {"id": "hidden", "label": "非表示", "text": "非表示本文", "enabled": False},
+                ],
+            }, ensure_ascii=False), encoding="utf-8")
+            with patch.object(app_module, "MEMO_TEMPLATES_PATH", templates_path):
+                result = await app_module.api_memo_templates()
+
+            self.assertEqual([item["id"] for item in result["templates"]], ["shown"])
+
     def test_target_contains_only_logical_type_and_id(self):
         self.assertEqual(
             app_module.normalize_asr_target({"type": "memo", "id": "memo_20260829_ab12cd34"}),

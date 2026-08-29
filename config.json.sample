@@ -9,6 +9,7 @@
   "wav_dir": "data/wav",
   "llm_outputs_dir": "data/llm",
   "memo_outputs_dir": "data/memo/outputs",
+  "memo_templates_path": "./memo_templates.json",
   "correction_rules_path": "./corrections.json",
   "wav_expire_days": 7,
   "windows_launcher": {
@@ -104,6 +105,21 @@
     "top_p": 0.9,
     "reasoning_enabled": false,
     "default_prompt_id": "soap_v1",
+    "memo_default_prompt_id": "proofread",
+    "memo_prompts": {
+      "proofread": {
+        "label": "誤字脱字を修正",
+        "template": "以下は音声入力された医療メモです。内容や意味を変えず、誤字脱字、句読点、明らかな音声認識の誤変換だけを修正してください。情報を追加・推測せず、修正後の本文だけを出力してください。\n\n【メモ】\n{text}"
+      },
+      "polish": {
+        "label": "医療文書として清書",
+        "template": "以下は音声入力された医療メモです。事実を追加・推測せず、内容を保ったまま、読みやすく丁寧な医療文書として清書してください。不明な箇所は補完せず［要確認］とし、本文だけを出力してください。\n\n【メモ】\n{text}"
+      },
+      "referral_letter": {
+        "label": "紹介状形式に整形",
+        "template": "以下の音声入力を、診療情報提供書・紹介状の文案として整理してください。紹介目的、傷病名、経過、所見・検査、治療内容、依頼事項を、入力に存在する範囲だけで構成してください。情報を追加・推測せず、不足項目は［未入力］としてください。完成した本文だけを出力してください。\n\n【音声入力】\n{text}"
+      }
+    },
     "correction_tool_default_prompt_id": "correction_v1",
     "correction_tool_prompts": {
       "correction_v1": {
