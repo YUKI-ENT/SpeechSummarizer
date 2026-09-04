@@ -66,7 +66,10 @@
   let hearingLastSavedText = '';
   let hearingTranslationActive = false;
   let hearingTranslationGeneration = 0;
-  let hearingTranslationQueue = Promise.resolve();
+  const hearingTranslationQueue = [];
+  let hearingTranslationWorkerRunning = false;
+  let hearingTranslationAbortController = null;
+  let hearingTranslatedText = '';
   let latestAsrSegment = '';
   let patientSessionRefreshTimer = null;
   let flushWaiter = null;
@@ -138,44 +141,98 @@
     return lines[lines.length - 1] || '';
   }
 
+  function updateHearingJapaneseText(text) {
+    if (!hearingJapaneseEl) return;
+    const next = text || '';
+    if (hearingJapaneseEl.textContent === next) return;
+    hearingJapaneseEl.textContent = next;
+    // 翻訳待ちとは独立して、最新のASR追記位置を常に表示する。
+    hearingJapaneseEl.scrollTop = hearingJapaneseEl.scrollHeight;
+  }
+
+  function updateHearingTranslatedText(text) {
+    if (!hearingTranslatedEl) return;
+    const next = text || '';
+    if (hearingTranslatedEl.textContent === next) return;
+    hearingTranslatedEl.textContent = next;
+    hearingTranslatedEl.scrollTop = hearingTranslatedEl.scrollHeight;
+  }
+
   async function translateHearingSegment(sourceText, language, generation) {
     if (!hearingTranslationActive || generation !== hearingTranslationGeneration) return;
-    if (hearingJapaneseEl) hearingJapaneseEl.textContent = sourceText;
-    if (hearingTranslatedEl) hearingTranslatedEl.textContent = '';
-    setHearingTranslationStatus('翻訳中…');
+    const controller = new AbortController();
+    hearingTranslationAbortController = controller;
     try {
       const r = await fetch('/api/hearing-translation/translate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: sourceText, language })
+        body: JSON.stringify({ text: sourceText, language }),
+        signal: controller.signal
       });
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || String(r.status));
       if (!hearingTranslationActive || generation !== hearingTranslationGeneration) return;
-      if (hearingTranslatedEl) hearingTranslatedEl.textContent = j.text || '';
+      const translated = (j.text || '').trim();
+      if (translated) {
+        hearingTranslatedText += (hearingTranslatedText ? '\n' : '') + translated;
+        updateHearingTranslatedText(hearingTranslatedText);
+      }
       setHearingTranslationStatus('');
       log(`[hearing] translated language=${j.language} model=${j.model} elapsed=${j.elapsed_sec}s`);
     } catch (e) {
+      if (e?.name === 'AbortError') return;
       if (!hearingTranslationActive || generation !== hearingTranslationGeneration) return;
       setHearingTranslationStatus(`翻訳できませんでした: ${e}`, true);
       log(`[hearing] translation failed: ${e}`);
+    } finally {
+      if (hearingTranslationAbortController === controller) {
+        hearingTranslationAbortController = null;
+      }
+    }
+  }
+
+  async function runHearingTranslationWorker() {
+    if (hearingTranslationWorkerRunning) return;
+    hearingTranslationWorkerRunning = true;
+    try {
+      while (hearingTranslationQueue.length) {
+        const job = hearingTranslationQueue.shift();
+        if (!hearingTranslationActive || job.generation !== hearingTranslationGeneration) continue;
+        const waiting = hearingTranslationQueue.filter(
+          queued => queued.generation === hearingTranslationGeneration
+        ).length;
+        setHearingTranslationStatus(waiting ? `翻訳中…（${waiting}件待ち）` : '翻訳中…');
+        await translateHearingSegment(job.text, job.language, job.generation);
+      }
+    } catch (e) {
+      log(`[hearing] translation worker failed: ${e}`);
+    } finally {
+      hearingTranslationWorkerRunning = false;
+      // finally直前にASR結果が追加された場合も取りこぼさない。
+      if (hearingTranslationQueue.length) void runHearingTranslationWorker();
     }
   }
 
   function queueHearingTranslation(sourceText) {
     const text = (sourceText || '').trim();
     if (!hearingTranslationActive || !text || !selHearingLanguage?.value) return;
-    const language = selHearingLanguage.value;
-    const generation = hearingTranslationGeneration;
-    hearingTranslationQueue = hearingTranslationQueue
-      .then(() => translateHearingSegment(text, language, generation))
-      .catch(e => log(`[hearing] translation queue failed: ${e}`));
+    hearingTranslationQueue.push({
+      text,
+      language: selHearingLanguage.value,
+      generation: hearingTranslationGeneration
+    });
+    void runHearingTranslationWorker();
   }
 
   function setHearingTranslationMode(on) {
     hearingTranslationActive = Boolean(on);
     hearingTranslationGeneration += 1;
-    hearingTranslationQueue = Promise.resolve();
+    hearingTranslationQueue.length = 0;
+    hearingTranslationAbortController?.abort();
+    if (hearingTranslationActive) {
+      hearingTranslatedText = '';
+      updateHearingTranslatedText('');
+    }
     hearingOverlay?.classList.toggle('translating', hearingTranslationActive);
     btnHearingTranslate?.setAttribute('aria-pressed', hearingTranslationActive ? 'true' : 'false');
     if (btnHearingTranslate) {
@@ -184,6 +241,7 @@
     setHearingTranslationStatus('');
     if (!hearingTranslationActive) return;
     const sourceText = latestAsrSegment || latestTranscriptLine();
+    updateHearingJapaneseText(liveAsrText || '音声認識待機中');
     if (sourceText) {
       queueHearingTranslation(sourceText);
     } else {
@@ -282,7 +340,10 @@
     selHearingLanguage.addEventListener('change', () => {
       if (!hearingTranslationActive) return;
       hearingTranslationGeneration += 1;
-      hearingTranslationQueue = Promise.resolve();
+      hearingTranslationQueue.length = 0;
+      hearingTranslationAbortController?.abort();
+      hearingTranslatedText = '';
+      updateHearingTranslatedText('');
       queueHearingTranslation(latestAsrSegment || latestTranscriptLine());
     });
   }
@@ -1089,6 +1150,7 @@
     latestAsrSegment = text.trim();
     liveAsrText += (liveAsrText ? '\n' : '') + text;
     updateHearingText(liveAsrText);
+    if (hearingTranslationActive) updateHearingJapaneseText(liveAsrText);
     queueHearingTranslation(latestAsrSegment);
 
     // 現在セッションカードのASR欄を更新
@@ -1098,9 +1160,19 @@
   function resetLiveAsr() {
     liveAsrText = '';
     latestAsrSegment = '';
+    hearingTranslatedText = '';
+    if (hearingTranslationActive) {
+      hearingTranslationGeneration += 1;
+      hearingTranslationQueue.length = 0;
+      hearingTranslationAbortController?.abort();
+    }
     hearingLastSavedSession = currentSessionTxt || '';
     hearingLastSavedText = '';
     updateHearingText('(音声認識待機中)');
+    if (hearingTranslationActive) {
+      updateHearingJapaneseText('音声認識待機中');
+      updateHearingTranslatedText('');
+    }
   }
 
   // ===== WebSocket: 常時接続（録音と独立） =====

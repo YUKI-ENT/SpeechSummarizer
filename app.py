@@ -9,6 +9,8 @@ import datetime
 import asyncio
 import sys
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 
 from pathlib import Path
 from urllib.parse import unquote
@@ -667,6 +669,13 @@ HEARING_TRANSLATION_REASONING_ENABLED: Optional[bool] = (
     _HEARING_TRANSLATION_REASONING_RAW
     if isinstance(_HEARING_TRANSLATION_REASONING_RAW, bool)
     else None
+)
+
+# Whisper ASR uses asyncio's default worker pool. Translation gets its own
+# single worker so a slow LLM request cannot occupy the ASR execution lane.
+_HEARING_TRANSLATION_EXECUTOR = ThreadPoolExecutor(
+    max_workers=1,
+    thread_name_prefix="hearing-translation",
 )
 
 
@@ -2215,17 +2224,22 @@ async def api_hearing_translation_translate(payload: Dict[str, Any] = Body(...))
     )
     t0 = time.time()
     try:
-        # クラウド応答待ちでASRのWebSocket処理を止めない。
-        translated, response_payload = await asyncio.to_thread(
-            openai_chat_text,
-            base_url=HEARING_TRANSLATION_BASE_URL,
-            api_key=HEARING_TRANSLATION_API_KEY,
-            model=HEARING_TRANSLATION_MODEL,
-            prompt=prompt,
-            timeout_sec=HEARING_TRANSLATION_TIMEOUT,
-            temperature=0.0,
-            top_p=0.9,
-            reasoning_enabled=HEARING_TRANSLATION_REASONING_ENABLED,
+        # ASRとは別の専用workerで逐次処理する。LLMが遅くても音声受信と
+        # ASR結果のWebSocket送信は先へ進められる。
+        loop = asyncio.get_running_loop()
+        translated, response_payload = await loop.run_in_executor(
+            _HEARING_TRANSLATION_EXECUTOR,
+            partial(
+                openai_chat_text,
+                base_url=HEARING_TRANSLATION_BASE_URL,
+                api_key=HEARING_TRANSLATION_API_KEY,
+                model=HEARING_TRANSLATION_MODEL,
+                prompt=prompt,
+                timeout_sec=HEARING_TRANSLATION_TIMEOUT,
+                temperature=0.0,
+                top_p=0.9,
+                reasoning_enabled=HEARING_TRANSLATION_REASONING_ENABLED,
+            ),
         )
         translated = strip_thinking_from_response(translated).strip()
         if not translated:
