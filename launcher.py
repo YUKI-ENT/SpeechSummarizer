@@ -44,8 +44,16 @@ PATH_KEYS = {
     ("ssl", "keyfile"),
 }
 MODEL_PATH_PREFIX = ("asr", "models")
+DEFAULT_HEARING_TRANSLATION_LANGUAGES = [
+    {"id": "en", "label": "英語", "name": "English"},
+    {"id": "zh", "label": "中国語", "name": "Simplified Chinese"},
+    {"id": "ko", "label": "韓国語", "name": "Korean"},
+]
 FIELD_DEFAULTS = {
     "memo_templates_path": "./memo_templates.json",
+    "hearing_translation_enabled": True,
+    "hearing_translation_timeout": 30,
+    "hearing_translation_default_language": "en",
     "asr_provider": "whisper",
     "qwen_base_url": "http://127.0.0.1:8010",
     "qwen_timeout": 35,
@@ -121,6 +129,42 @@ def set_nested(cfg: dict, path: tuple[str, ...], value) -> None:
 
 def normalize_path_text(value: str) -> str:
     return value.replace("\\", "/").strip()
+
+
+def validate_hearing_translation_languages(
+    rows: list[tuple[str, str, str]], default_language: str
+) -> list[dict[str, str]]:
+    languages: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for language_id, label, name in rows:
+        language_id = language_id.strip()
+        label = label.strip()
+        name = name.strip()
+        if not language_id and not label and not name:
+            continue
+        if not language_id or not label or not name:
+            raise ValueError("翻訳言語のID、表示名、LLM向け言語名をすべて入力してください。")
+        if len(language_id) > 24:
+            raise ValueError(f"翻訳言語IDは24文字以内で入力してください: {language_id}")
+        if len(name) > 80:
+            raise ValueError(f"LLM向け言語名は80文字以内で入力してください: {name}")
+        if language_id in seen:
+            raise ValueError(f"翻訳言語IDが重複しています: {language_id}")
+        seen.add(language_id)
+        languages.append({"id": language_id, "label": label, "name": name})
+
+    if not languages:
+        raise ValueError("翻訳言語を1件以上追加してください。")
+    if default_language.strip() not in seen:
+        raise ValueError("既定の翻訳言語を言語一覧から選択してください。")
+    return languages
+
+
+def get_hearing_translation_languages(cfg: dict) -> list[dict[str, str]]:
+    languages = get_nested(cfg, ("hearing_translation", "languages"), None)
+    if not isinstance(languages, list) or not languages:
+        return [dict(item) for item in DEFAULT_HEARING_TRANSLATION_LANGUAGES]
+    return languages
 
 
 def get_memo_templates_path(cfg: dict) -> Path:
@@ -213,6 +257,7 @@ class LauncherApp:
         self.field_meta: dict[str, dict] = {}
         self.model_rows: list[tuple[tk.StringVar, tk.StringVar]] = []
         self.prompt_rows: list[tuple[tk.StringVar, tk.StringVar, ScrolledText]] = []
+        self.translation_language_rows: list[dict[str, object]] = []
         self.memo_ai_prompts: list[dict[str, str]] = []
         self.memo_ai_selected_index: int | None = None
         self._memo_ai_selection_changing = False
@@ -287,18 +332,21 @@ class LauncherApp:
         general_tab = ScrollableTab(notebook, padding=12)
         asr_tab = ScrollableTab(notebook, padding=12)
         llm_tab = ScrollableTab(notebook, padding=12)
+        hearing_translation_tab = ScrollableTab(notebook, padding=12)
         memo_ai_tab = ScrollableTab(notebook, padding=12)
         memo_templates_tab = ScrollableTab(notebook, padding=12)
 
         notebook.add(general_tab, text="一般")
         notebook.add(asr_tab, text="ASR")
         notebook.add(llm_tab, text="LLM")
+        notebook.add(hearing_translation_tab, text="難聴翻訳")
         notebook.add(memo_ai_tab, text="メモAI")
         notebook.add(memo_templates_tab, text="メモ定型文")
 
         self._build_general_tab(general_tab.content)
         self._build_asr_tab(asr_tab.content)
         self._build_llm_tab(llm_tab.content)
+        self._build_hearing_translation_tab(hearing_translation_tab.content)
         self._build_memo_ai_tab(memo_ai_tab.content)
         self._build_memo_templates_tab(memo_templates_tab.content)
         self._build_log_panel(lower)
@@ -614,6 +662,89 @@ class LauncherApp:
         btn_row = ttk.Frame(prompt_box)
         btn_row.grid(row=row_idx, column=0, columnspan=3, sticky="w", pady=(8, 0))
         ttk.Button(btn_row, text="追加", command=self.add_prompt_row).pack(side="left")
+
+    def _build_hearing_translation_tab(self, parent: ttk.Frame) -> None:
+        for i in range(4):
+            parent.columnconfigure(i, weight=1)
+
+        row = 0
+        self._add_bool(
+            parent, "hearing_translation_enabled", "難聴モードの翻訳を有効にする",
+            ("hearing_translation", "enabled"), row=row,
+        )
+        row += 1
+
+        ttk.Label(parent, text="翻訳モデル").grid(
+            row=row, column=0, sticky="w", padx=(0, 8), pady=6
+        )
+        translation_model_var = tk.StringVar()
+        self.vars["hearing_translation_model"] = translation_model_var
+        self.field_meta["hearing_translation_model"] = {
+            "path": ("hearing_translation", "model"), "kind": "str"
+        }
+        self.hearing_translation_model_box = ttk.Combobox(
+            parent, textvariable=translation_model_var, state="normal", width=32
+        )
+        self.hearing_translation_model_box.grid(
+            row=row, column=1, sticky="we", padx=(0, 16), pady=6
+        )
+        self.vars["llm_model_default"].trace_add(
+            "write", lambda *_args: self._refresh_translation_model_choices()
+        )
+        self.vars["auto_llm_model_id"].trace_add(
+            "write", lambda *_args: self._refresh_translation_model_choices()
+        )
+        self._add_entry(
+            parent, "hearing_translation_timeout", "Timeout",
+            ("hearing_translation", "timeout"), kind="float", row=row, col=2, width=12,
+        )
+        row += 1
+
+        ttk.Label(parent, text="既定の翻訳言語").grid(
+            row=row, column=0, sticky="w", padx=(0, 8), pady=6
+        )
+        default_language_var = tk.StringVar()
+        self.vars["hearing_translation_default_language"] = default_language_var
+        self.field_meta["hearing_translation_default_language"] = {
+            "path": ("hearing_translation", "default_language"), "kind": "choice"
+        }
+        self.hearing_translation_default_box = ttk.Combobox(
+            parent, textvariable=default_language_var, state="readonly", width=18
+        )
+        self.hearing_translation_default_box.grid(
+            row=row, column=1, sticky="w", padx=(0, 16), pady=6
+        )
+        row += 1
+
+        ttk.Label(
+            parent,
+            text=(
+                "翻訳モデルは通常の要約モデルとは別に指定できます。"
+                "接続先を個別指定していない場合は、LLMタブの設定を使用します。"
+                "変更はサーバー再起動後に反映されます。"
+            ),
+            wraplength=900,
+        ).grid(row=row, column=0, columnspan=4, sticky="w", pady=(0, 10))
+        row += 1
+
+        language_box = ttk.LabelFrame(parent, text="翻訳言語一覧", padding=10)
+        language_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(4, 0))
+        language_box.columnconfigure(0, weight=1)
+        language_box.columnconfigure(1, weight=2)
+        language_box.columnconfigure(2, weight=3)
+        ttk.Label(language_box, text="ID").grid(row=0, column=0, sticky="w", padx=(0, 8))
+        ttk.Label(language_box, text="表示名").grid(row=0, column=1, sticky="w", padx=(0, 8))
+        ttk.Label(language_box, text="LLM向け言語名").grid(row=0, column=2, sticky="w", padx=(0, 8))
+        self.translation_language_box = language_box
+        self.translation_language_button_row = ttk.Frame(language_box)
+        ttk.Button(
+            self.translation_language_button_row,
+            text="言語を追加",
+            command=self.add_translation_language_row,
+        ).pack(side="left")
+
+        language_cfg = get_hearing_translation_languages(self.cfg)
+        self._set_translation_language_rows(language_cfg)
 
     def _build_log_panel(self, parent: ttk.Frame) -> None:
         panel = ttk.LabelFrame(parent, text="サーバーログ", padding=10)
@@ -1015,6 +1146,104 @@ class LauncherApp:
         row_idx = len(self.prompt_rows) + 1
         self._add_prompt_row_widgets(self.prompt_box, row_idx)
 
+    def _add_translation_language_row_widgets(
+        self, language_id: str = "", label: str = "", name: str = ""
+    ) -> None:
+        id_var = tk.StringVar(value=language_id)
+        label_var = tk.StringVar(value=label)
+        name_var = tk.StringVar(value=name)
+        id_entry = ttk.Entry(self.translation_language_box, textvariable=id_var, width=16)
+        label_entry = ttk.Entry(self.translation_language_box, textvariable=label_var, width=22)
+        name_entry = ttk.Entry(self.translation_language_box, textvariable=name_var, width=32)
+        delete_button = ttk.Button(self.translation_language_box, text="削除", width=8)
+        item: dict[str, object] = {
+            "id_var": id_var,
+            "label_var": label_var,
+            "name_var": name_var,
+            "widgets": (id_entry, label_entry, name_entry, delete_button),
+        }
+        delete_button.configure(command=lambda current=item: self.delete_translation_language_row(current))
+        id_entry.bind("<FocusOut>", self._on_translation_language_id_changed)
+        id_entry.bind("<Return>", self._on_translation_language_id_changed)
+        self.translation_language_rows.append(item)
+        self._layout_translation_language_rows()
+
+    def _layout_translation_language_rows(self) -> None:
+        for index, item in enumerate(self.translation_language_rows, start=1):
+            widgets = item["widgets"]
+            widgets[0].grid(row=index, column=0, sticky="we", padx=(0, 8), pady=4)
+            widgets[1].grid(row=index, column=1, sticky="we", padx=(0, 8), pady=4)
+            widgets[2].grid(row=index, column=2, sticky="we", padx=(0, 8), pady=4)
+            widgets[3].grid(row=index, column=3, sticky="w", pady=4)
+        self.translation_language_button_row.grid(
+            row=len(self.translation_language_rows) + 1,
+            column=0,
+            columnspan=4,
+            sticky="w",
+            pady=(8, 0),
+        )
+
+    def _set_translation_language_rows(self, languages) -> None:
+        for item in self.translation_language_rows:
+            for widget in item["widgets"]:
+                widget.destroy()
+        self.translation_language_rows.clear()
+        for language in languages:
+            if not isinstance(language, dict):
+                continue
+            self._add_translation_language_row_widgets(
+                str(language.get("id") or ""),
+                str(language.get("label") or ""),
+                str(language.get("name") or ""),
+            )
+        self._layout_translation_language_rows()
+        self._refresh_translation_default_choices()
+
+    def add_translation_language_row(self) -> None:
+        self._add_translation_language_row_widgets()
+        self.translation_language_rows[-1]["widgets"][0].focus_set()
+
+    def delete_translation_language_row(self, item: dict[str, object]) -> None:
+        if item not in self.translation_language_rows:
+            return
+        for widget in item["widgets"]:
+            widget.destroy()
+        self.translation_language_rows.remove(item)
+        self._layout_translation_language_rows()
+        self._refresh_translation_default_choices()
+
+    def _on_translation_language_id_changed(self, _event=None) -> None:
+        self._refresh_translation_default_choices()
+
+    def _refresh_translation_default_choices(self) -> None:
+        language_ids = [
+            item["id_var"].get().strip()
+            for item in self.translation_language_rows
+            if item["id_var"].get().strip()
+        ]
+        self.hearing_translation_default_box.configure(values=language_ids)
+        current = self.vars["hearing_translation_default_language"].get().strip()
+        if language_ids and current not in language_ids:
+            self.vars["hearing_translation_default_language"].set(language_ids[0])
+        elif not language_ids:
+            self.vars["hearing_translation_default_language"].set("")
+
+    def _refresh_translation_model_choices(self) -> None:
+        candidates = [
+            self.vars["hearing_translation_model"].get(),
+            self.vars["llm_model_default"].get(),
+            self.vars["auto_llm_model_id"].get(),
+            get_nested(self.cfg, ("hearing_translation", "model"), ""),
+            get_nested(self.cfg, ("llm", "model_default"), ""),
+        ]
+        candidates.extend(
+            item.get("model_id", "")
+            for item in (self.cfg.get("auto_llm_prompts") or [])
+            if isinstance(item, dict)
+        )
+        models = list(dict.fromkeys(str(value).strip() for value in candidates if str(value).strip()))
+        self.hearing_translation_model_box.configure(values=models)
+
     def _load_form_from_config(self) -> None:
         if hasattr(self, "whisper_settings_box"):
             self._set_widget_tree_enabled(self.whisper_settings_box, True)
@@ -1034,6 +1263,8 @@ class LauncherApp:
                 fallback = FIELD_DEFAULTS.get(name, False if kind == "bool" else "")
                 if name in {"qwen_context", "vibevoice_context"}:
                     fallback = get_nested(self.cfg, ("asr", "initial_prompt"), fallback)
+                if name == "hearing_translation_model":
+                    fallback = get_nested(self.cfg, ("llm", "model_default"), fallback)
                 value = get_nested(self.cfg, path, fallback)
                 if name == "vibevoice_hotwords" and isinstance(value, list):
                     value = "\n".join(str(word) for word in value)
@@ -1093,6 +1324,11 @@ class LauncherApp:
             self.prompt_rows[idx][0].set("")
             self.prompt_rows[idx][1].set("")
             self.prompt_rows[idx][2].delete("1.0", "end")
+
+        language_cfg = get_hearing_translation_languages(self.cfg)
+        self._set_translation_language_rows(language_cfg)
+        self._refresh_translation_model_choices()
+        self._refresh_translation_default_choices()
 
         try:
             memo_ai_prompts, memo_ai_default_id = normalize_memo_ai_settings(
@@ -1222,6 +1458,7 @@ class LauncherApp:
         try:
             self._commit_memo_ai_editor()
             self._commit_memo_template_editor()
+            self._refresh_translation_default_choices()
             for name, field in self.field_meta.items():
                 path = field["path"]
                 kind = field["kind"]
@@ -1278,6 +1515,33 @@ class LauncherApp:
                     raise ValueError("llm.server にはURLではなくIPアドレスまたはホスト名だけを入力してください。")
                 if not 1 <= llm_port <= 65535:
                     raise ValueError("llm.port は1～65535で指定してください。")
+
+            translation_enabled = bool(
+                get_nested(cfg, ("hearing_translation", "enabled"), True)
+            )
+            translation_model = str(
+                get_nested(cfg, ("hearing_translation", "model"), "")
+            ).strip()
+            translation_timeout = float(
+                get_nested(cfg, ("hearing_translation", "timeout"), 0)
+            )
+            if translation_enabled and not translation_model:
+                raise ValueError("難聴翻訳を有効にする場合は翻訳モデルを選択してください。")
+            if translation_timeout <= 0:
+                raise ValueError("難聴翻訳のTimeoutは0より大きい値を指定してください。")
+            translation_rows = [
+                (
+                    item["id_var"].get(),
+                    item["label_var"].get(),
+                    item["name_var"].get(),
+                )
+                for item in self.translation_language_rows
+            ]
+            translation_languages = validate_hearing_translation_languages(
+                translation_rows,
+                str(get_nested(cfg, ("hearing_translation", "default_language"), "")),
+            )
+            set_nested(cfg, ("hearing_translation", "languages"), translation_languages)
 
             if not get_nested(cfg, ("asr", "model_id"), "").strip():
                 raise ValueError("asr.model_id が空です。")
