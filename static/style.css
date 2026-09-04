@@ -1188,14 +1188,14 @@ body.log-shown .log-card {
 }
 
 .hearing-japanese {
-  font-size: calc(clamp(22px, 3.2vw, 48px) * var(--hearing-zoom));
-  line-height: 1.45;
+  font-size: calc(clamp(18px, 3.0vw, 36px) * var(--hearing-zoom));
+  line-height: 1.25;
   color: rgba(255, 255, 255, 0.78);
 }
 
 .hearing-translated {
-  font-size: calc(clamp(34px, 5.5vw, 82px) * var(--hearing-zoom));
-  line-height: 1.35;
+  font-size: calc(clamp(28px, 4.5vw, 68px) * var(--hearing-zoom));
+  line-height: 1.15;
   font-weight: 700;
 }
 
