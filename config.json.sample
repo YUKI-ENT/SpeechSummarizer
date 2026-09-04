@@ -151,6 +151,18 @@
     }
   },
 
+  "hearing_translation": {
+    "enabled": true,
+    "model": "翻訳に使用するOllamaモデルID",
+    "timeout": 30,
+    "default_language": "en",
+    "languages": [
+      { "id": "en", "label": "英語", "name": "English" },
+      { "id": "zh", "label": "中国語", "name": "Simplified Chinese" },
+      { "id": "ko", "label": "韓国語", "name": "Korean" }
+    ]
+  },
+
   "auto_llm": false,
   "auto_llm_prompts": [
     {

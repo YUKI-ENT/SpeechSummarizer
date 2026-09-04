@@ -23,6 +23,12 @@
   const btnMemo = document.getElementById('btnMemo');
   const btnZoomIn = document.getElementById('btnZoomIn');
   const btnZoomOut = document.getElementById('btnZoomOut');
+  const btnHearingTranslate = document.getElementById('btnHearingTranslate');
+  const selHearingLanguage = document.getElementById('selHearingLanguage');
+  const hearingBilingualEl = document.getElementById('hearingBilingual');
+  const hearingJapaneseEl = document.getElementById('hearingJapanese');
+  const hearingTranslatedEl = document.getElementById('hearingTranslated');
+  const hearingTranslationStatusEl = document.getElementById('hearingTranslationStatus');
 
   const patientSelectEl = document.getElementById('patientSelect');
   const patientInputEl = document.getElementById('patientInput');
@@ -58,6 +64,10 @@
   let hearingSaveTimer = null;
   let hearingLastSavedSession = '';
   let hearingLastSavedText = '';
+  let hearingTranslationActive = false;
+  let hearingTranslationGeneration = 0;
+  let hearingTranslationQueue = Promise.resolve();
+  let latestAsrSegment = '';
   let patientSessionRefreshTimer = null;
   let flushWaiter = null;
 
@@ -103,12 +113,104 @@
 
     if (on) {
       applyHearingZoom();
+    } else if (hearingTranslationActive) {
+      setHearingTranslationMode(false);
     }
   }
 
   function applyHearingZoom() {
     if (hearingTextEl) {
       hearingTextEl.style.setProperty('--hearing-zoom', hearingZoom);
+    }
+    if (hearingBilingualEl) {
+      hearingBilingualEl.style.setProperty('--hearing-zoom', hearingZoom);
+    }
+  }
+
+  function setHearingTranslationStatus(text, isError = false) {
+    if (!hearingTranslationStatusEl) return;
+    hearingTranslationStatusEl.textContent = text || '';
+    hearingTranslationStatusEl.classList.toggle('error', isError);
+  }
+
+  function latestTranscriptLine() {
+    const lines = (liveAsrText || '').split(/\r?\n/).map(line => line.trim()).filter(Boolean);
+    return lines[lines.length - 1] || '';
+  }
+
+  async function translateHearingSegment(sourceText, language, generation) {
+    if (!hearingTranslationActive || generation !== hearingTranslationGeneration) return;
+    if (hearingJapaneseEl) hearingJapaneseEl.textContent = sourceText;
+    if (hearingTranslatedEl) hearingTranslatedEl.textContent = '';
+    setHearingTranslationStatus('翻訳中…');
+    try {
+      const r = await fetch('/api/hearing-translation/translate', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: sourceText, language })
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || String(r.status));
+      if (!hearingTranslationActive || generation !== hearingTranslationGeneration) return;
+      if (hearingTranslatedEl) hearingTranslatedEl.textContent = j.text || '';
+      setHearingTranslationStatus('');
+      log(`[hearing] translated language=${j.language} model=${j.model} elapsed=${j.elapsed_sec}s`);
+    } catch (e) {
+      if (!hearingTranslationActive || generation !== hearingTranslationGeneration) return;
+      setHearingTranslationStatus(`翻訳できませんでした: ${e}`, true);
+      log(`[hearing] translation failed: ${e}`);
+    }
+  }
+
+  function queueHearingTranslation(sourceText) {
+    const text = (sourceText || '').trim();
+    if (!hearingTranslationActive || !text || !selHearingLanguage?.value) return;
+    const language = selHearingLanguage.value;
+    const generation = hearingTranslationGeneration;
+    hearingTranslationQueue = hearingTranslationQueue
+      .then(() => translateHearingSegment(text, language, generation))
+      .catch(e => log(`[hearing] translation queue failed: ${e}`));
+  }
+
+  function setHearingTranslationMode(on) {
+    hearingTranslationActive = Boolean(on);
+    hearingTranslationGeneration += 1;
+    hearingTranslationQueue = Promise.resolve();
+    hearingOverlay?.classList.toggle('translating', hearingTranslationActive);
+    btnHearingTranslate?.setAttribute('aria-pressed', hearingTranslationActive ? 'true' : 'false');
+    if (btnHearingTranslate) {
+      btnHearingTranslate.textContent = hearingTranslationActive ? '翻訳中' : '翻訳';
+    }
+    setHearingTranslationStatus('');
+    if (!hearingTranslationActive) return;
+    const sourceText = latestAsrSegment || latestTranscriptLine();
+    if (sourceText) {
+      queueHearingTranslation(sourceText);
+    } else {
+      if (hearingJapaneseEl) hearingJapaneseEl.textContent = '音声認識待機中';
+      if (hearingTranslatedEl) hearingTranslatedEl.textContent = '';
+    }
+  }
+
+  async function loadHearingTranslationSettings() {
+    if (!btnHearingTranslate || !selHearingLanguage) return;
+    try {
+      const r = await fetch('/api/hearing-translation/settings');
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || String(r.status));
+      const languages = Array.isArray(j.languages) ? j.languages : [];
+      selHearingLanguage.innerHTML = languages.map(item =>
+        `<option value="${e_(item.id)}">${e_(item.label)}</option>`
+      ).join('');
+      if (j.default_language) selHearingLanguage.value = j.default_language;
+      const available = Boolean(j.enabled && languages.length);
+      btnHearingTranslate.disabled = !available;
+      selHearingLanguage.disabled = !available;
+      btnHearingTranslate.closest('.hearing-translation-controls')?.classList.toggle('is-disabled', !available);
+      btnHearingTranslate.title = available ? `字幕翻訳モデル: ${j.model}` : '字幕翻訳は無効です';
+    } catch (e) {
+      btnHearingTranslate.closest('.hearing-translation-controls')?.classList.add('is-disabled');
+      log(`[hearing] translation settings failed: ${e}`);
     }
   }
 
@@ -168,6 +270,21 @@
       hearingZoom = Math.max(hearingZoom - 0.1, 0.5);
       applyHearingZoom();
     };
+  }
+
+  if (btnHearingTranslate) {
+    btnHearingTranslate.addEventListener('click', () => {
+      setHearingTranslationMode(!hearingTranslationActive);
+    });
+  }
+
+  if (selHearingLanguage) {
+    selHearingLanguage.addEventListener('change', () => {
+      if (!hearingTranslationActive) return;
+      hearingTranslationGeneration += 1;
+      hearingTranslationQueue = Promise.resolve();
+      queueHearingTranslation(latestAsrSegment || latestTranscriptLine());
+    });
   }
 
   if (hearingTextEl) {
@@ -969,8 +1086,10 @@
   // ===== ライブASR追記 =====
   function appendLiveAsr(text) {
     if (!text) return;
+    latestAsrSegment = text.trim();
     liveAsrText += (liveAsrText ? '\n' : '') + text;
     updateHearingText(liveAsrText);
+    queueHearingTranslation(latestAsrSegment);
 
     // 現在セッションカードのASR欄を更新
     syncCurrentCardAsr(liveAsrText);
@@ -978,6 +1097,7 @@
 
   function resetLiveAsr() {
     liveAsrText = '';
+    latestAsrSegment = '';
     hearingLastSavedSession = currentSessionTxt || '';
     hearingLastSavedText = '';
     updateHearingText('(音声認識待機中)');
@@ -1422,6 +1542,7 @@
   loadAppVersion();
   loadAsrModels();
   loadLlmModels().then(() => loadLlmPrompts());
+  loadHearingTranslationSettings();
   loadRecentPatients();
   connectWs();  // ★ 起動時にWS接続（常時接続）
 })();

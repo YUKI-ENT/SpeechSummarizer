@@ -151,6 +151,26 @@ pip install -r requirements.txt
 
   APIキーが必要なサービスでは `api_key` に設定するか、たとえば `api_key_env` を `OPENAI_API_KEY` にして、その環境変数へキーを設定してください。
 
+- hearing_translation セクション
+  難聴字幕画面の「翻訳」を有効にすると、ASRの確定セグメントごとにLLMへ問い合わせ、上段に日本語、下段に翻訳字幕を表示します。翻訳結果は保存されません。
+  `model` は通常の要約用 `llm.model_default` とは独立しています。接続設定を省略するとメインの `llm` と同じOpenAI互換APIを使うため、同じOllamaから別のローカルモデルやOllama Cloudモデルを呼ぶ場合は `model` だけ指定します。別サーバーを使う場合に限り `base_url` を追加してください。認証も分ける場合は `api_key` または `api_key_env` を追加できます。
+
+  ```json
+  "hearing_translation": {
+    "enabled": true,
+    "model": "翻訳に使用するOllamaモデルID",
+    "timeout": 30,
+    "default_language": "en",
+    "languages": [
+      { "id": "en", "label": "英語", "name": "English" },
+      { "id": "zh", "label": "中国語", "name": "Simplified Chinese" },
+      { "id": "ko", "label": "韓国語", "name": "Korean" }
+    ]
+  }
+  ```
+
+  `languages` の `id` は画面/API用識別子、`label` は画面表示、`name` はLLMへの翻訳先指定です。
+
   - prompts セクション
     - 自由に追加できます。こちらの例を参考に追加してみてください。
       ```

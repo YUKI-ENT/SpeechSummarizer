@@ -631,6 +631,85 @@ LLM_REASONING_ENABLED: Optional[bool] = (
     _LLM_REASONING_ENABLED_RAW if isinstance(_LLM_REASONING_ENABLED_RAW, bool) else None
 )
 
+# 難聴字幕の翻訳は、通常の要約LLMとは独立したモデル・接続先を利用できる。
+# 未指定の接続項目だけ llm 設定を継承するため、モデル名だけを分ける運用も可能。
+HEARING_TRANSLATION_CFG = CFG.get("hearing_translation", {}) or {}
+HEARING_TRANSLATION_ENABLED = bool(HEARING_TRANSLATION_CFG.get("enabled", True))
+HEARING_TRANSLATION_MODEL = str(
+    HEARING_TRANSLATION_CFG.get("model") or LLM_MODEL_DEFAULT
+).strip()
+_HEARING_TRANSLATION_SERVER = str(HEARING_TRANSLATION_CFG.get("server") or "").strip()
+if _HEARING_TRANSLATION_SERVER:
+    HEARING_TRANSLATION_BASE_URL = build_openai_base_url(
+        _HEARING_TRANSLATION_SERVER,
+        int(HEARING_TRANSLATION_CFG.get("port") or 11434),
+        use_https=bool(HEARING_TRANSLATION_CFG.get("use_https", False)),
+    )
+else:
+    HEARING_TRANSLATION_BASE_URL = str(
+        HEARING_TRANSLATION_CFG.get("base_url") or LLM_BASE_URL
+    ).strip()
+HEARING_TRANSLATION_API_KEY = str(HEARING_TRANSLATION_CFG.get("api_key") or "").strip()
+_HEARING_TRANSLATION_API_KEY_ENV = str(
+    HEARING_TRANSLATION_CFG.get("api_key_env") or ""
+).strip()
+if not HEARING_TRANSLATION_API_KEY and _HEARING_TRANSLATION_API_KEY_ENV:
+    HEARING_TRANSLATION_API_KEY = os.environ.get(_HEARING_TRANSLATION_API_KEY_ENV, "").strip()
+if not HEARING_TRANSLATION_API_KEY and not (
+    "api_key" in HEARING_TRANSLATION_CFG or "api_key_env" in HEARING_TRANSLATION_CFG
+):
+    HEARING_TRANSLATION_API_KEY = LLM_API_KEY
+HEARING_TRANSLATION_TIMEOUT = float(
+    HEARING_TRANSLATION_CFG.get("timeout") or LLM_TIMEOUT
+)
+_HEARING_TRANSLATION_REASONING_RAW = HEARING_TRANSLATION_CFG.get("reasoning_enabled")
+HEARING_TRANSLATION_REASONING_ENABLED: Optional[bool] = (
+    _HEARING_TRANSLATION_REASONING_RAW
+    if isinstance(_HEARING_TRANSLATION_REASONING_RAW, bool)
+    else None
+)
+
+
+def _normalize_hearing_translation_languages(raw: Any) -> List[Dict[str, str]]:
+    default_languages = [
+        {"id": "en", "label": "英語", "name": "English"},
+        {"id": "zh", "label": "中国語", "name": "Simplified Chinese"},
+        {"id": "ko", "label": "韓国語", "name": "Korean"},
+    ]
+    if raw is None:
+        return default_languages
+    if not isinstance(raw, list):
+        return default_languages
+
+    languages: List[Dict[str, str]] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        language_id = str(item.get("id") or "").strip()
+        label = str(item.get("label") or "").strip()
+        name = str(item.get("name") or "").strip()
+        if not language_id or not label or not name or language_id in seen:
+            continue
+        if len(language_id) > 24 or len(name) > 80:
+            continue
+        seen.add(language_id)
+        languages.append({"id": language_id, "label": label, "name": name})
+    return languages or default_languages
+
+
+HEARING_TRANSLATION_LANGUAGES = _normalize_hearing_translation_languages(
+    HEARING_TRANSLATION_CFG.get("languages")
+)
+HEARING_TRANSLATION_DEFAULT_LANGUAGE = str(
+    HEARING_TRANSLATION_CFG.get("default_language")
+    or HEARING_TRANSLATION_LANGUAGES[0]["id"]
+).strip()
+if HEARING_TRANSLATION_DEFAULT_LANGUAGE not in {
+    item["id"] for item in HEARING_TRANSLATION_LANGUAGES
+}:
+    HEARING_TRANSLATION_DEFAULT_LANGUAGE = HEARING_TRANSLATION_LANGUAGES[0]["id"]
+
 LLM_PROMPTS: Dict[str, Dict[str, Any]] = LLM_CFG.get("prompts", {})  # ★ dictのまま
 LLM_DEFAULT_PROMPT_ID = (LLM_CFG.get("default_prompt_id") or "soap_v1").strip()
 _CONFIG_SAMPLE: dict = {}
@@ -2080,6 +2159,91 @@ def strip_thinking_from_response(text: str) -> str:
             return text2[m.start():].strip()
 
     return text2.strip()
+
+
+@app.get("/api/hearing-translation/settings")
+async def api_hearing_translation_settings():
+    """公開してよい字幕翻訳設定だけをUIへ返す。"""
+    return {
+        "ok": True,
+        "enabled": HEARING_TRANSLATION_ENABLED,
+        "model": HEARING_TRANSLATION_MODEL,
+        "languages": [
+            {"id": item["id"], "label": item["label"]}
+            for item in HEARING_TRANSLATION_LANGUAGES
+        ],
+        "default_language": HEARING_TRANSLATION_DEFAULT_LANGUAGE,
+    }
+
+
+@app.post("/api/hearing-translation/translate")
+async def api_hearing_translation_translate(payload: Dict[str, Any] = Body(...)):
+    """1つの字幕セグメントを翻訳する。結果はファイルへ保存しない。"""
+    if not HEARING_TRANSLATION_ENABLED:
+        return JSONResponse(
+            {"ok": False, "error": "hearing translation is disabled"},
+            status_code=503,
+        )
+    if not HEARING_TRANSLATION_MODEL:
+        return JSONResponse(
+            {"ok": False, "error": "hearing translation model is not configured"},
+            status_code=503,
+        )
+
+    source_text = str(payload.get("text") or "").strip()
+    if not source_text:
+        return JSONResponse({"ok": False, "error": "text is required"}, status_code=400)
+    if len(source_text) > 4000:
+        return JSONResponse({"ok": False, "error": "text is too long"}, status_code=400)
+
+    language_id = str(
+        payload.get("language") or HEARING_TRANSLATION_DEFAULT_LANGUAGE
+    ).strip()
+    language = next(
+        (item for item in HEARING_TRANSLATION_LANGUAGES if item["id"] == language_id),
+        None,
+    )
+    if language is None:
+        return JSONResponse({"ok": False, "error": "unsupported language"}, status_code=400)
+
+    prompt = (
+        f"Translate the following Japanese medical conversation subtitle into "
+        f"{language['name']}. Preserve the meaning, questions, short replies, names, "
+        "numbers, and uncertainty exactly. Do not add explanations or facts. "
+        "Return only the translated subtitle, without quotes or Markdown.\n\n"
+        f"Japanese subtitle:\n{source_text}"
+    )
+    t0 = time.time()
+    try:
+        # クラウド応答待ちでASRのWebSocket処理を止めない。
+        translated, response_payload = await asyncio.to_thread(
+            openai_chat_text,
+            base_url=HEARING_TRANSLATION_BASE_URL,
+            api_key=HEARING_TRANSLATION_API_KEY,
+            model=HEARING_TRANSLATION_MODEL,
+            prompt=prompt,
+            timeout_sec=HEARING_TRANSLATION_TIMEOUT,
+            temperature=0.0,
+            top_p=0.9,
+            reasoning_enabled=HEARING_TRANSLATION_REASONING_ENABLED,
+        )
+        translated = strip_thinking_from_response(translated).strip()
+        if not translated:
+            raise RuntimeError("empty translation response")
+        log(
+            f"[HEARING_TRANSLATION] model={HEARING_TRANSLATION_MODEL} "
+            f"language={language_id} response_len={len(translated)}"
+        )
+        return {
+            "ok": True,
+            "text": translated,
+            "language": language_id,
+            "model": response_payload.get("model", HEARING_TRANSLATION_MODEL),
+            "elapsed_sec": round(time.time() - t0, 3),
+        }
+    except Exception as e:
+        log(f"[HEARING_TRANSLATION] failed language={language_id}: {e}")
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
 
 @app.post("/api/llm/soap")
 async def api_llm_soap(payload: Dict[str, Any] = Body(...)):

@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SpeechSummarizer</title>
   <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
-  <link rel="stylesheet" href="/static/style.css">
+  <link rel="stylesheet" href="/static/style.css?v=20260904">
 </head>
 
 <body>
@@ -92,6 +92,13 @@
   <!-- 難聴モード字幕 -->
   <div id="hearingOverlay" class="hearing-overlay">
 
+    <div class="hearing-translation-controls">
+      <select id="selHearingLanguage" class="btn hearing-language" aria-label="字幕の翻訳先言語" disabled></select>
+      <button id="btnHearingTranslate" class="btn hearing-translate" type="button" aria-pressed="false" disabled>
+        翻訳
+      </button>
+    </div>
+
     <div class="hearing-zoom-controls">
       <button id="btnZoomOut" class="btn btn-zoom" type="button" title="文字を小さく">－</button>
       <button id="btnZoomIn" class="btn btn-zoom" type="button" title="文字を大きく">＋</button>
@@ -103,6 +110,12 @@
 
     <textarea id="hearingText" class="hearing-text" spellcheck="false" autocomplete="off" autocapitalize="off"
       rows="6"></textarea>
+
+    <div id="hearingBilingual" class="hearing-bilingual" aria-live="polite">
+      <div id="hearingJapanese" class="hearing-japanese"></div>
+      <div id="hearingTranslationStatus" class="hearing-translation-status"></div>
+      <div id="hearingTranslated" class="hearing-translated"></div>
+    </div>
 
   </div>
 
@@ -164,7 +177,7 @@
   <button id="btnStart" style="display:none"></button>
   <button id="btnStop" style="display:none"></button>
 
-  <script src="/static/common.js?v=20260829"></script>
+  <script src="/static/common.js?v=20260904"></script>
 
 </body>
 
