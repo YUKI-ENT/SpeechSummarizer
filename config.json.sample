@@ -159,7 +159,13 @@
     "languages": [
       { "id": "en", "label": "英語", "name": "English" },
       { "id": "zh", "label": "中国語", "name": "Simplified Chinese" },
-      { "id": "ko", "label": "韓国語", "name": "Korean" }
+      { "id": "ko", "label": "韓国語", "name": "Korean" },
+      { "id": "de", "label": "ドイツ語", "name": "German" },
+      { "id": "es", "label": "スペイン語", "name": "Spanish" },
+      { "id": "pt", "label": "ポルトガル語", "name": "Portuguese" },
+      { "id": "id", "label": "インドネシア語", "name": "Indonesian" },
+      { "id": "th", "label": "タイ語", "name": "Thai" },
+      { "id": "vi", "label": "ベトナム語", "name": "Vietnamese" }
     ]
   },
 

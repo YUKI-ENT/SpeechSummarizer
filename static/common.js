@@ -24,6 +24,8 @@
   const btnZoomIn = document.getElementById('btnZoomIn');
   const btnZoomOut = document.getElementById('btnZoomOut');
   const btnHearingTranslate = document.getElementById('btnHearingTranslate');
+  const selHearingModel = document.getElementById('selHearingModel');
+  let savedHearingModel = '';
   const selHearingLanguage = document.getElementById('selHearingLanguage');
   const hearingBilingualEl = document.getElementById('hearingBilingual');
   const hearingJapaneseEl = document.getElementById('hearingJapanese');
@@ -256,6 +258,11 @@
       const r = await fetch('/api/hearing-translation/settings');
       const j = await r.json();
       if (!r.ok || !j.ok) throw new Error(j.error || String(r.status));
+      savedHearingModel = j.model || '';
+      if (selHearingModel) {
+        selHearingModel.replaceChildren(new Option(savedHearingModel, savedHearingModel));
+        void loadHearingTranslationModels(j.enabled);
+      }
       const languages = Array.isArray(j.languages) ? j.languages : [];
       selHearingLanguage.innerHTML = languages.map(item =>
         `<option value="${e_(item.id)}">${e_(item.label)}</option>`
@@ -271,6 +278,47 @@
       log(`[hearing] translation settings failed: ${e}`);
     }
   }
+
+  async function loadHearingTranslationModels(enabled) {
+    try {
+      const r = await fetch('/api/hearing-translation/models');
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || String(r.status));
+      const models = [...new Set([savedHearingModel, ...(j.models || [])].filter(Boolean))];
+      selHearingModel.replaceChildren(...models.map(model => new Option(model, model)));
+      selHearingModel.value = savedHearingModel;
+      selHearingModel.disabled = !enabled || !models.length;
+    } catch (e) {
+      selHearingModel.title = `モデル一覧を取得できませんでした: ${e}`;
+      log(`[hearing] model list failed: ${e}`);
+    }
+  }
+
+  selHearingModel?.addEventListener('change', async () => {
+    const model = selHearingModel.value;
+    const wasActive = hearingTranslationActive;
+    setHearingTranslationMode(false);
+    selHearingModel.disabled = true;
+    btnHearingTranslate.disabled = true;
+    try {
+      const r = await fetch('/api/hearing-translation/settings', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model })
+      });
+      const j = await r.json();
+      if (!r.ok || !j.ok) throw new Error(j.error || String(r.status));
+      savedHearingModel = j.model;
+      btnHearingTranslate.title = `字幕翻訳モデル: ${j.model}`;
+    } catch (e) {
+      selHearingModel.value = savedHearingModel;
+      alert(`字幕翻訳モデルを保存できませんでした。\n${e}`);
+    } finally {
+      selHearingModel.disabled = false;
+      btnHearingTranslate.disabled = false;
+      if (wasActive) setHearingTranslationMode(true);
+    }
+  });
 
   function syncCurrentCardAsr(text) {
     if (!currentSessionTxt || !karteTimeline) return;

@@ -2185,6 +2185,52 @@ async def api_hearing_translation_settings():
     }
 
 
+@app.get("/api/hearing-translation/models")
+async def api_hearing_translation_models():
+    try:
+        models = await asyncio.to_thread(
+            list_openai_models, HEARING_TRANSLATION_BASE_URL,
+            api_key=HEARING_TRANSLATION_API_KEY, timeout_sec=HEARING_TRANSLATION_TIMEOUT,
+        )
+        if HEARING_TRANSLATION_MODEL and HEARING_TRANSLATION_MODEL not in models:
+            models.insert(0, HEARING_TRANSLATION_MODEL)
+        return {"ok": True, "models": models}
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": str(e)}, status_code=502)
+
+
+@app.post("/api/hearing-translation/settings")
+async def api_hearing_translation_update_settings(payload: Dict[str, Any] = Body(...)):
+    global HEARING_TRANSLATION_MODEL
+    model = payload.get("model")
+    if not isinstance(model, str) or not model.strip() or len(model) > 256:
+        return JSONResponse({"ok": False, "error": "model must be a non-empty string (max 256 characters)"}, status_code=400)
+    model = model.strip()
+    temporary_path = None
+    try:
+        # Preserve unrelated settings, including edits made since startup.
+        config = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        config.setdefault("hearing_translation", {})["model"] = model
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=CONFIG_PATH.parent,
+            prefix=".config-", suffix=".tmp", delete=False,
+        ) as f:
+            temporary_path = Path(f.name)
+            json.dump(config, f, ensure_ascii=False, indent=2)
+            f.write("\n")
+        os.chmod(temporary_path, CONFIG_PATH.stat().st_mode & 0o777)
+        os.replace(temporary_path, CONFIG_PATH)
+    except Exception as e:
+        return JSONResponse({"ok": False, "error": f"設定の保存に失敗しました: {e}"}, status_code=500)
+    finally:
+        if temporary_path is not None:
+            temporary_path.unlink(missing_ok=True)
+    HEARING_TRANSLATION_MODEL = model
+    HEARING_TRANSLATION_CFG["model"] = model
+    CFG["hearing_translation"] = HEARING_TRANSLATION_CFG
+    return {"ok": True, "model": model}
+
+
 @app.post("/api/hearing-translation/translate")
 async def api_hearing_translation_translate(payload: Dict[str, Any] = Body(...)):
     """1つの字幕セグメントを翻訳する。結果はファイルへ保存しない。"""
@@ -2199,6 +2245,7 @@ async def api_hearing_translation_translate(payload: Dict[str, Any] = Body(...))
             status_code=503,
         )
 
+    model = HEARING_TRANSLATION_MODEL
     source_text = str(payload.get("text") or "").strip()
     if not source_text:
         return JSONResponse({"ok": False, "error": "text is required"}, status_code=400)
@@ -2233,7 +2280,7 @@ async def api_hearing_translation_translate(payload: Dict[str, Any] = Body(...))
                 openai_chat_text,
                 base_url=HEARING_TRANSLATION_BASE_URL,
                 api_key=HEARING_TRANSLATION_API_KEY,
-                model=HEARING_TRANSLATION_MODEL,
+                model=model,
                 prompt=prompt,
                 timeout_sec=HEARING_TRANSLATION_TIMEOUT,
                 temperature=0.0,
@@ -2245,14 +2292,14 @@ async def api_hearing_translation_translate(payload: Dict[str, Any] = Body(...))
         if not translated:
             raise RuntimeError("empty translation response")
         log(
-            f"[HEARING_TRANSLATION] model={HEARING_TRANSLATION_MODEL} "
+            f"[HEARING_TRANSLATION] model={model} "
             f"language={language_id} response_len={len(translated)}"
         )
         return {
             "ok": True,
             "text": translated,
             "language": language_id,
-            "model": response_payload.get("model", HEARING_TRANSLATION_MODEL),
+            "model": response_payload.get("model", model),
             "elapsed_sec": round(time.time() - t0, 3),
         }
     except Exception as e:

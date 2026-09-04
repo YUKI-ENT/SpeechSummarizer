@@ -1095,6 +1095,12 @@ body.log-shown .log-card {
   z-index: 210;
   display: flex;
   gap: 10px;
+  flex-wrap: wrap;
+  max-width: calc(100% - 110px);
+}
+
+.hearing-model {
+  max-width: min(300px, 65vw);
 }
 
 .hearing-language,
@@ -1281,12 +1287,18 @@ body.log-shown .log-card {
 
 @media (max-width: 760px) {
   .hearing-overlay {
-    padding: 145px 18px 24px;
+    padding: 205px 18px 24px;
   }
 
   .hearing-translation-controls {
     top: 82px;
     left: 18px;
+  }
+
+  .hearing-model {
+    flex-basis: 100%;
+    max-width: 100%;
+    min-width: 0;
   }
 
   .hearing-close {
