@@ -16,6 +16,11 @@ SpeechSummarizer は、医療現場向けに設計されたリアルタイム音
 
 [![SpeechSummarizer Demo](https://img.youtube.com/vi/ujOWRbY5qK4/maxresdefault.jpg)](https://youtu.be/ujOWRbY5qK4)
 
+[▶ メモ機能の音声変換デモ動画（音声あり）をYouTubeで見る](https://youtu.be/jg21wgJTzrI?si=NjOsRpbS2-W6quw0)
+
+[▶ 翻訳機能のデモ動画（音声あり）をYouTubeで見る](https://youtu.be/Z-p6Bf8G47Y?si=f7-s5y5hDU-Clp28)
+
+
 ## インストール方法
 
 ### 【Windows版（EXE）】
@@ -306,8 +311,14 @@ JSONLにはprovider名、engine、実測timing、providerが実際に返したme
 **自動LLM送信と電子カルテ連携を設定しておけば、マイクボタンを押すだけで、音声認識・LLMへの送信・次の患者のカルテへの遷移まで自動で動作します。** 診察のたびに文字起こしや要約を手動で送信する手間を減らせます。
 
 1. メイン画面のマイクボタンを押して録音を開始します。会話が自動で認識され、文字起こしが表示されます。
-2. 電子カルテ（ダイナミクス）で次の患者へ切り替えると、それまでの診察内容がLLMへ自動送信され、SOAP形式など、設定した形式で要約されます。
-3. SpeechSummarizerの画面も次の患者のカルテへ自動で切り替わり、そのまま録音を続けられます。文字起こしや要約は患者IDごとに履歴として保存されます。
+   <img width="954" height="225" alt="image" src="https://github.com/user-attachments/assets/0bcde79c-5a80-4f31-ad75-730fb1eb49c3" />
+
+   音声認識動作中は、マイクボタンが赤く点灯します。
+   <img width="946" height="171" alt="image" src="https://github.com/user-attachments/assets/b55f9237-1fa0-4f03-babe-c6e097fbac65" />
+
+
+3. 電子カルテ（ダイナミクス）で次の患者へ切り替えると、それまでの診察内容がLLMへ自動送信され、SOAP形式など、設定した形式で要約されます。
+4. SpeechSummarizerの画面も次の患者のカルテへ自動で切り替わり、そのまま録音を続けられます。文字起こしや要約は患者IDごとに履歴として保存されます。
 
 診察が終わったら、もう一度マイクボタンを押して録音を停止します。最後の患者の診察内容も、録音停止時にLLMへ自動送信されます。
 
@@ -329,22 +340,30 @@ JSONLにはprovider名、engine、実測timing、providerが実際に返したme
 **カルテ用の記録を続けながら、会話の内容を大きな文字で表示できます。** 聞き取りにくい方に画面を見せながら説明するときに便利です。
 
 - メイン画面の耳のアイコンから「字幕（難聴）モード」に切り替えると、認識された会話が大きな字幕で表示されます。
+  <img width="473" height="86" alt="image" src="https://github.com/user-attachments/assets/963f0af8-a877-44d8-a543-8715272c0f0c" />
+
+  <img width="653" height="213" alt="image" src="https://github.com/user-attachments/assets/2db7e2ed-7a9f-4f8c-90c1-b00fc0d46150" />
+
 - 「翻訳」を有効にして翻訳先の言語を選ぶと、認識された発話ごとに逐次翻訳し、リアルタイムに翻訳字幕を表示できます。相手に合わせて翻訳先を切り替え、多言語でのやり取りに活用できます。
 - 翻訳用のLLMモデルや利用する言語は、Windows GUIの「難聴翻訳」タブで設定できます。
 
-[![翻訳機能のデモ動画](https://img.youtube.com/vi/Z-p6Bf8G47Y/hqdefault.jpg)](https://youtu.be/Z-p6Bf8G47Y?si=f7-s5y5hDU-Clp28)
+  [![翻訳機能のデモ動画](https://img.youtube.com/vi/Z-p6Bf8G47Y/hqdefault.jpg)](https://youtu.be/Z-p6Bf8G47Y?si=f7-s5y5hDU-Clp28)
 
-[▶ 翻訳機能のデモ動画をYouTubeで見る](https://youtu.be/Z-p6Bf8G47Y?si=f7-s5y5hDU-Clp28)
+  [▶ 翻訳機能のデモ動画をYouTubeで見る](https://youtu.be/Z-p6Bf8G47Y?si=f7-s5y5hDU-Clp28)
 
 ### 3. メモ機能：カルテ記録とは別に音声入力とLLM補正
 
 **カルテ記録とは別に、音声でメモを作成し、LLMで文章を補正・整形できます。** 備忘録や説明文の下書きなどに利用できます。
 
 1. メイン画面の鉛筆アイコンから「音声メモ」を開き、マイクボタンで音声入力します。
+  <img width="631" height="134" alt="image" src="https://github.com/user-attachments/assets/4635fde2-5cc0-484c-9ad1-f752e5eafd5c" />
+
 2. 認識された文章をそのままメモに反映するか、処理内容とLLMモデルを選んで「AI送信」し、文章を補正・整形します。
 3. 結果を確認して「メモを置き換える」または「メモ末尾に追加」で反映します。メモは手入力でも編集でき、自動保存されます。
 
 よく使う文章は定型文として登録できます。定型文はWindows GUIの「メモ定型文」タブ、LLMに依頼する処理やプロンプトは「メモAI」タブで編集できます。
+
+  <img width="1306" height="998" alt="image" src="https://github.com/user-attachments/assets/1b24b11f-e591-4537-a9ac-4cf548e5215b" />
 
 [![メモ機能の音声変換デモ動画](https://img.youtube.com/vi/jg21wgJTzrI/hqdefault.jpg)](https://youtu.be/jg21wgJTzrI?si=NjOsRpbS2-W6quw0)
 
@@ -357,6 +376,8 @@ JSONLにはprovider名、engine、実測timing、providerが実際に返したme
 - 「誤変換補正ツール」で診察会話の記録を確認し、誤認識された表記と正しい表記の組み合わせを登録します。
 - 手入力のほか、LLMで補正候補を抽出し、確認して辞書に追加することもできます。
 - ASRモデルごとの辞書を作成できるため、モデルごとの誤認識の傾向に合わせて調整できます。補正ルールは `corrections.json` に保存されます。
+  <img width="1306" height="990" alt="image" src="https://github.com/user-attachments/assets/71e1adc4-18ab-418f-97df-ea6ff81309ed" />
+
 
 # 【補足】GPU (CUDA) 利用方法（Linux）  
   
