@@ -170,6 +170,7 @@
   },
 
   "auto_llm": false,
+  "auto_llm_every_stop": false,
   "auto_llm_prompts": [
     {
       "model_id": "gemma4:12b",

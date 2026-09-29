@@ -628,6 +628,12 @@ class LauncherApp:
         row += 1
         self._add_bool(parent, "auto_llm", "自動LLM", ("auto_llm",), row=row)
         row += 1
+        self._add_bool(
+            parent, "auto_llm_every_stop",
+            "毎回LLM送信（再開後も送信・自動LLM有効時）",
+            ("auto_llm_every_stop",), row=row,
+        )
+        row += 1
 
         auto_box = ttk.LabelFrame(parent, text="自動LLM 先頭設定", padding=10)
         auto_box.grid(row=row, column=0, columnspan=4, sticky="nsew", pady=(10, 0))

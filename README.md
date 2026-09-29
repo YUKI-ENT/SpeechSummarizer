@@ -122,6 +122,12 @@ pip install -r requirements.txt
         "keyfile": "certs/key.pem"
       },
     ```
+- auto_llm / auto_llm_every_stop:
+  `auto_llm: true` で録音停止・患者切替時に自動でLLMへ送信します。
+  `auto_llm_every_stop: true` を併用すると、記録→中断→再開後も、ASR結果が追加されるたびに記録全体を再送信します。
+  未指定または `false` では従来どおり最初の1回のみです。ASR結果が増えていない場合は重複送信しません。
+  Windows GUIの「LLM」タブで「自動LLM」と「毎回LLM送信」を設定できます。設定保存後、サーバーを再起動してください。
+
 - llmセクション
   - server / port:
     OpenAI互換APIのサーバーとポートを指定します。`server: "127.0.0.1"`, `port: 11434` なら、内部では `http://127.0.0.1:11434/v1` に接続します。

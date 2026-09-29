@@ -843,12 +843,13 @@ def save_llm_summary(*, jsonl_path: Path, model: str, prompt_id: str, summary: s
 # ==========================================
 
 AUTO_LLM_ENABLED = bool(CFG.get("auto_llm", False))
+AUTO_LLM_EVERY_STOP = bool(CFG.get("auto_llm_every_stop", False))
 AUTO_LLM_PROMPTS = CFG.get("auto_llm_prompts") or []
 if not isinstance(AUTO_LLM_PROMPTS, list):
     AUTO_LLM_PROMPTS = []
 
 _auto_llm_q = None
-# 追加：同じjsonlを複数回 enqueue しない（WS切断が複数回起きても防ぐ）
+# 同じ記録（毎回送信時は同じASR版）の多重enqueueを防ぐ。
 _auto_llm_enqueued: set[str] = set()
 
 def _normalize_auto_llm_item(it: dict) -> dict | None:
@@ -863,9 +864,30 @@ def _normalize_auto_llm_item(it: dict) -> dict | None:
         return None
     return {"model_id": model_id.strip(), "prompt_id": prompt_id.strip(), "asr_correct": asr_correct}
 
-def _has_auto_llm_done(jsonl_path: Path, *, model_id: str, prompt_id: str, asr_correct: bool) -> bool:
+def _auto_llm_asr_revision(jsonl_path: Path) -> str | None:
+    """ASRレコードだけを識別する。完了・承認・再開マーカーでは再送しない。"""
+    digest = hashlib.sha256()
+    has_asr = False
+    with jsonl_path.open("r", encoding="utf-8", errors="replace") as f:
+        for line in f:
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(rec, dict) or rec.get("type") != "asr":
+                continue
+            if not str(rec.get("text") or "").strip():
+                continue
+            digest.update(json.dumps(rec, sort_keys=True, ensure_ascii=False).encode("utf-8"))
+            digest.update(b"\n")
+            has_asr = True
+    return digest.hexdigest() if has_asr else None
+
+
+def _has_auto_llm_done(jsonl_path: Path, *, model_id: str, prompt_id: str, asr_correct: bool,
+                       asr_revision: str | None = None) -> bool:
     """
-    重複送信防止：同一jsonlに type=auto_llm_done が既にあればスキップ
+    重複送信防止：毎回送信時は同じASR版の完了だけを対象にする。
     """
     try:
         if not jsonl_path.exists():
@@ -884,7 +906,8 @@ def _has_auto_llm_done(jsonl_path: Path, *, model_id: str, prompt_id: str, asr_c
                 meta = rec.get("meta") or {}
                 if (meta.get("model_id") == model_id and
                     meta.get("prompt_id") == prompt_id and
-                    bool(meta.get("asr_correct")) == bool(asr_correct)):
+                    bool(meta.get("asr_correct")) == bool(asr_correct) and
+                    (asr_revision is None or meta.get("asr_revision") == asr_revision)):
                     return True
         return False
     except Exception:
@@ -927,8 +950,13 @@ def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str = "switch") -> i
     # ★追加：存在しないなら何もしない
     if not jsonl_path.exists():
         return 0
-    # ★追加：メモリ内ガード（同じjsonlを多重enqueueしない）
+    asr_revision = _auto_llm_asr_revision(jsonl_path) if AUTO_LLM_EVERY_STOP else None
+    if AUTO_LLM_EVERY_STOP and asr_revision is None:
+        return 0
+    # 停止API・患者切替・WS切断が重なっても、同じASR版は一度だけ送信する。
     key = str(jsonl_path.resolve())
+    if asr_revision is not None:
+        key += ":" + asr_revision
     if key in _auto_llm_enqueued:
         return 0
     _auto_llm_enqueued.add(key)
@@ -941,15 +969,16 @@ def enqueue_auto_llm_for_jsonl(jsonl_path: Path, *, reason: str = "switch") -> i
             continue
 
         # ★追加：同一promptの過去LLM履歴があればスキップ（患者移動/マイクOnOff連打対策）
-        if _has_llm_history_for_prompt(jsonl_path, prompt_id=it["prompt_id"]):
+        if not AUTO_LLM_EVERY_STOP and _has_llm_history_for_prompt(jsonl_path, prompt_id=it["prompt_id"]):
             continue
         # 既存：JSONLに auto_llm_done があるならスキップ（再起動後対策）
-        if _has_auto_llm_done(jsonl_path, **it):
+        if _has_auto_llm_done(jsonl_path, **it, asr_revision=asr_revision):
             continue
 
         _auto_llm_q.put_nowait({
             "jsonl_path": str(jsonl_path),
             "reason": reason,
+            "asr_revision": asr_revision,
             **it,  # model_id, prompt_id, asr_correct
         })
         queued += 1
@@ -1051,6 +1080,7 @@ async def _run_auto_llm_job(job: dict):
             "asr_correct": asr_correct,
             "dt_sec": round(dt, 2),
             "llm_output": out_name,
+            "asr_revision": job.get("asr_revision"),
         }
     }, jsonl_path)
 
