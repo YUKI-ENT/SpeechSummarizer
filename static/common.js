@@ -62,6 +62,16 @@
   let trackMuteRecoveryTimer = null;
 
   let currentPatientId = '';   // 現在選択中の患者ID
+  let currentChartBranch = null;
+  let summaryObserver = null;
+  let patientSessionsGeneration = 0;
+  let patientContextGeneration = 0;
+  let switchViewRefresh = null;
+  let patientSessionsRequest = null;
+  let recentPatientsRequest = null;
+  let recentPatientsLoadedAt = 0;
+  const uiNow = () => globalThis.performance?.now?.() ?? Date.now();
+  const asrRequests = new WeakMap();
   let currentSessionTxt = '';   // 現在録音中 / 選択中のセッション(.txt)名
   let liveAsrText = '';   // ライブASRの累積テキスト
   let recentPatientIds = [];   // 新しい順・重複なし
@@ -104,7 +114,7 @@
     }));
   }
 
-  async function requestRecordingStart(requestId = '', patientId = '') {
+  async function requestRecordingStart(requestId = '', patientId = '', chartBranch = null) {
     const id = `${recordingClientId}-${Date.now()}-${Math.random()}`;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -114,7 +124,7 @@
       recordingReplies.set(id, { resolve: msg => { clearTimeout(timer); resolve(msg); },
         reject: error => { clearTimeout(timer); reject(error); } });
       ws.send(JSON.stringify({ command: 'recording_begin', id,
-        request_id: requestId, patient_id: patientId }));
+        request_id: requestId, patient_id: patientId, chart_branch: chartBranch }));
     });
   }
 
@@ -689,66 +699,105 @@
     } catch (e) { log(`[ui] loadLlmPrompts failed: ${e}`); }
   }
 
-  async function loadRecentPatients() {
-    if (!patientSelectEl) return;
-
-    try {
-      const r = await fetch('/api/sessions');
-      const j = await r.json();
-      const items = Array.isArray(j?.items) ? j.items : [];
-
-      const seen = new Set();
-      recentPatientIds = [];
-      const pidToName = {};
-
-      for (const it of items) {
-        const pid = String(it?.patient_id || '').trim();
-        if (!pid || seen.has(pid)) continue;
-        seen.add(pid);
-        recentPatientIds.push(pid);
-        if (it?.patient_info?.name) {
-          pidToName[pid] = it.patient_info.name;
-        }
-      }
-
-      const optionHtml = recentPatientIds
-        .map(pid => {
-          const label = pidToName[pid]
-            ? `${e_(pid)} | ${e_(pidToName[pid])}`
-            : `${e_(pid)}`;
-          return `<option value="${e_(pid)}">${label}</option>`;
-        })
-        .join('');
-
-      patientSelectEl.innerHTML = `<option value="">履歴</option>${optionHtml}`;
-      if (currentPatientId) {
-        patientSelectEl.value = recentPatientIds.includes(currentPatientId) ? currentPatientId : '';
-      }
-
-      log(`[patient] recent list loaded: ${recentPatientIds.length}`);
-    } catch (e) {
-      log(`[patient] loadRecentPatients failed: ${e}`);
+  function loadRecentPatients({ force = false } = {}) {
+    if (!patientSelectEl) return Promise.resolve();
+    if (recentPatientsRequest) return recentPatientsRequest;
+    if (!force && recentPatientsLoadedAt && Date.now() - recentPatientsLoadedAt < 60000) {
+      return Promise.resolve();
     }
+    recentPatientsRequest = (async () => {
+      const started = uiNow();
+      try {
+        const r = await fetch('/api/sessions');
+        const j = await r.json();
+        if (!r.ok || !j?.ok) throw new Error(j?.error || String(r.status));
+        const received = uiNow();
+        const items = Array.isArray(j.items) ? j.items : [];
+        const seen = new Set();
+        recentPatientIds = [];
+        const options = [];
+        for (const it of items) {
+          const pid = String(it?.patient_id || '').trim();
+          if (!pid || seen.has(pid)) continue;
+          seen.add(pid);
+          recentPatientIds.push(pid);
+          const label = it.patient_info?.name ? `${pid} | ${it.patient_info.name}` : pid;
+          options.push(`<option value="${e_(pid)}">${e_(label)}</option>`);
+        }
+        patientSelectEl.innerHTML = `<option value="">履歴</option>${options.join('')}`;
+        if (currentPatientId) ensureRecentPatientOption(currentPatientId);
+        recentPatientsLoadedAt = Date.now();
+        log(`[perf] recent patients=${items.length} fetch_ms=${(received - started).toFixed(1)} render_ms=${(uiNow() - received).toFixed(1)}`);
+      } catch (e) {
+        log(`[patient] loadRecentPatients failed: ${e}`);
+      }
+    })().finally(() => { recentPatientsRequest = null; });
+    return recentPatientsRequest;
   }
 
-  // ===== 患者セッション一覧の読み込み →サイドバー + タイムライン描画 =====
-  async function loadPatientSessions(pid, opts = {}) {
-    if (!pid) return;
-    try {
-      // APIからセッションと患者情報を取得
-      const [rSessions, rInfo] = await Promise.all([
-        fetch(`/api/patient/${encodeURIComponent(pid)}/sessions`),
-        fetch(`/api/patient/${encodeURIComponent(pid)}/info`).then(res => res.ok ? res.json() : null).catch(() => null)
-      ]);
-      const jSessions = await rSessions.json();
-      if (!jSessions || !jSessions.ok) throw new Error(jSessions?.error || 'failed');
-
-      const pInfo = (rInfo && rInfo.ok) ? rInfo.patient_info : null;
-      renderSidebar(pid, jSessions.sessions || [], pInfo);
-      renderTimeline(jSessions.sessions || [], opts);
-    } catch (e) {
-      log(`[patient] loadPatientSessions failed: ${e}`);
+  function selectPatientContext(pid, branch, session) {
+    const changed = currentPatientId !== pid || currentChartBranch !== branch || currentSessionTxt !== session;
+    currentPatientId = pid;
+    currentChartBranch = branch;
+    currentSessionTxt = session;
+    if (changed) {
+      ++patientSessionsGeneration;
+      ++patientContextGeneration;
+      switchViewRefresh = null;
+      patientSessionsRequest?.controller.abort();
     }
+    return changed;
+  }
+
+  // The POST response and WS notification describe the same switch. They share
+  // one refresh even when one arrives after the other's request has completed.
+  function refreshPatientAfterSwitch(pid) {
+    clearTimeout(patientSessionRefreshTimer);
+    patientSessionRefreshTimer = null;
+    if (switchViewRefresh?.context === patientContextGeneration) return switchViewRefresh.promise;
+    const promise = loadPatientSessions(pid, { autoShowLatest: true });
+    switchViewRefresh = { context: patientContextGeneration, promise };
+    promise.then(ok => {
+      if (!ok && switchViewRefresh?.promise === promise) switchViewRefresh = null;
+    });
+    return promise;
+  }
+
+  // Patient info and history travel in one response; coalesce concurrent refreshes.
+  function loadPatientSessions(pid, opts = {}) {
+    if (!pid) return Promise.resolve(false);
+    const context = patientContextGeneration;
+    if (patientSessionsRequest?.pid === pid && patientSessionsRequest.context === context) {
+      return patientSessionsRequest.promise;
+    }
+    patientSessionsRequest?.controller.abort();
+    const controller = new AbortController();
+    const generation = ++patientSessionsGeneration;
+    const promise = (async () => {
+      const started = uiNow();
+      try {
+        const r = await fetch(`/api/patient/${encodeURIComponent(pid)}/sessions`, { signal: controller.signal });
+        const j = await r.json();
+        const received = uiNow();
+        if (!r.ok || !j?.ok) throw new Error(j?.error || String(r.status));
+        if (pid !== currentPatientId || generation !== patientSessionsGeneration) return false;
+        ensureRecentPatientOption(pid, j.patient_info);
+        renderSidebar(pid, j.sessions || [], j.patient_info || null);
+        renderTimeline(j.sessions || [], opts);
+        const rendered = uiNow();
+        log(`[perf] patient=${pid} sessions=${j.sessions?.length || 0} sqlite_ms=${j.query_ms ?? '?'} fetch_ms=${(received - started).toFixed(1)} render_ms=${(rendered - received).toFixed(1)}`);
+        await loadAllCardAsrText();
+        return true;
+      } catch (e) {
+        if (e.name !== 'AbortError') log(`[patient] loadPatientSessions failed: ${e}`);
+        return false;
+      }
+    })();
+    patientSessionsRequest = { pid, context, controller, promise };
+    promise.finally(() => {
+      if (patientSessionsRequest?.promise === promise) patientSessionsRequest = null;
+    });
+    return promise;
   }
 
   function calculateAge(dobString) {
@@ -817,6 +866,7 @@
         <span class="sidebar-icon">${icon}</span>
         <span class="sidebar-date">${e_(s.date)}</span>
         <span class="sidebar-time">${e_(s.time)}</span>
+        <span class="sidebar-branch">${e_(branchLabel(s.chart_branch))}</span>
       </div>`;
     }).join('');
 
@@ -836,9 +886,13 @@
   }
 
   function parseSessionStamp(sessionTxt) {
-    const m = String(sessionTxt || '').match(/^(.+?)_(\d{8}_\d{6})\.txt$/);
+    const m = String(sessionTxt || '').match(/^([^_]+?)(?:_b([0-9]))?_(\d{8}_\d{6})(?:_c[0-9a-f]{32})?\.txt$/);
     if (!m) return null;
-    return { patientId: m[1], stamp: m[2] };
+    return { patientId: m[1], chartBranch: m[2] === undefined ? null : Number(m[2]), stamp: m[3] };
+  }
+
+  function branchLabel(branch) {
+    return branch === null || branch === undefined ? '枝番不明' : `枝番 ${branch}`;
   }
 
   function buildOptimisticSession(sessionTxt) {
@@ -847,6 +901,7 @@
     const { stamp } = parsed;
     return {
       session_txt: sessionTxt,
+      chart_branch: parsed.chartBranch,
       stamp,
       date: `${stamp.slice(0, 4)}-${stamp.slice(4, 6)}-${stamp.slice(6, 8)}`,
       time: `${stamp.slice(9, 11)}:${stamp.slice(11, 13)}`,
@@ -856,24 +911,23 @@
     };
   }
 
-  function ensureRecentPatientOption(pid) {
+  function ensureRecentPatientOption(pid, patientInfo = null) {
     pid = String(pid || '').trim();
     if (!pid || !patientSelectEl) return;
 
     recentPatientIds = [pid, ...recentPatientIds.filter(x => x !== pid)];
 
-    const optionMap = new Map();
-    Array.from(patientSelectEl.querySelectorAll('option')).forEach(opt => {
-      if (opt.value) optionMap.set(opt.value, opt.textContent || opt.value);
-    });
-    if (!optionMap.has(pid)) optionMap.set(pid, pid);
-
-    const optionHtml = recentPatientIds
-      .filter(x => optionMap.has(x))
-      .map(x => `<option value="${e_(x)}">${e_(optionMap.get(x) || x)}</option>`)
-      .join('');
-
-    patientSelectEl.innerHTML = `<option value="">履歴</option>${optionHtml}`;
+    // Move one option; rebuilding thousands of options on every switch stalls
+    // the browser and is unrelated to the speed of the SQLite query.
+    let option = Array.from(patientSelectEl.options).find(item => item.value === pid);
+    if (!option) {
+      option = document.createElement('option');
+      option.value = pid;
+      option.textContent = pid;
+    }
+    if (patientInfo?.name) option.textContent = `${pid} | ${patientInfo.name}`;
+    const firstPatient = patientSelectEl.options[1] || null;
+    if (option !== firstPatient) patientSelectEl.insertBefore(option, firstPatient);
     patientSelectEl.value = pid;
   }
 
@@ -895,16 +949,14 @@
     clearTimeout(patientSessionRefreshTimer);
     patientSessionRefreshTimer = setTimeout(() => {
       patientSessionRefreshTimer = null;
-      loadPatientSessions(pid, opts)
-        .then(() => loadAllCardAsrText())
-        .then(() => loadRecentPatients())
-        .catch(e => log(`[patient] refresh failed: ${e}`));
+      if (pid === currentPatientId) void loadPatientSessions(pid, opts);
     }, 120);
   }
 
   // ===== タイムライン描画 =====
   function renderTimeline(sessions, opts = {}) {
     if (!karteTimeline) return;
+    summaryObserver?.disconnect();
 
     if (!sessions.length) {
       karteTimeline.innerHTML = '<div class="karte-empty muted2">受診履歴がありません</div>';
@@ -916,6 +968,10 @@
     // カード内イベント登録
     karteTimeline.querySelectorAll('.karte-card').forEach(card => {
       const session = card.dataset.session;
+      // Closed past transcripts are fetched only when opened.
+      card.querySelector('.asr-section')?.addEventListener('toggle', (event) => {
+        if (event.target.open && !card.dataset.asrLoaded) void loadAsrText(card, session);
+      });
 
       // LLM送信ボタン
       card.querySelectorAll('.btn-llm-run').forEach(btn => {
@@ -979,7 +1035,7 @@
     //   1) 確定済みがあればそれを表示
     //   2) 確定済みがなければ、最新LLMを表示（autoShowLatest時）
     //   3) LLM履歴がなければ何もしない
-    karteTimeline.querySelectorAll('.karte-card').forEach(card => {
+    const loadCardSummary = (card) => {
       const session = card.dataset.session;
       const approvedOpt = card.querySelector('.llm-history-select option[data-approved="true"]');
       const latestOpt = card.querySelector('.llm-history-select option');
@@ -989,7 +1045,21 @@
       } else if (latestOpt && opts.autoShowLatest) {
         loadLlmContent(card, session, latestOpt.value);
       }
-    });
+    };
+    // Keep all branches in the timeline, loading summaries as cards come into view.
+    if (typeof IntersectionObserver !== 'undefined') {
+      summaryObserver = new IntersectionObserver(entries => {
+        entries.forEach(entry => {
+          if (entry.isIntersecting) {
+            summaryObserver.unobserve(entry.target);
+            loadCardSummary(entry.target);
+          }
+        });
+      }, { rootMargin: '300px' });
+      karteTimeline.querySelectorAll('.karte-card').forEach(card => summaryObserver.observe(card));
+    } else {
+      karteTimeline.querySelectorAll('.karte-card').forEach(loadCardSummary);
+    }
   }
 
   // ===== カード1枚のHTML生成 =====
@@ -1043,6 +1113,7 @@
     <div class="karte-card-date">
       <span class="karte-date">${e_(s.date)}</span>
       <span class="karte-time">${e_(s.time)}</span>
+      <span class="karte-branch">${e_(branchLabel(s.chart_branch))}</span>
     </div>
     <span class="badge ${badgeCls}">${badgeLabel}</span>${recMark}
   </div>
@@ -1130,16 +1201,23 @@
   }
 
   // ===== ASRテキスト読み込み =====
-  async function loadAsrText(card, sessionTxt) {
+  function loadAsrText(card, sessionTxt) {
+    if (asrRequests.has(card)) return asrRequests.get(card);
     const preEl = card.querySelector('.asr-text');
-    if (!preEl) return;
-    try {
-      const r = await fetch('/api/session/' + encodeURIComponent(sessionTxt));
-      const j = await r.json();
-      preEl.textContent = j.text || '(テキストなし)';
-    } catch (e) {
-      preEl.textContent = `(読み込み失敗: ${e})`;
-    }
+    if (!preEl) return Promise.resolve();
+    const promise = (async () => {
+      try {
+        const r = await fetch('/api/session/' + encodeURIComponent(sessionTxt));
+        const j = await r.json();
+        if (!r.ok) throw new Error(j?.error || String(r.status));
+        preEl.textContent = j.text || '(テキストなし)';
+        card.dataset.asrLoaded = 'true';
+      } catch (e) {
+        preEl.textContent = `(読み込み失敗: ${e})`;
+      }
+    })().finally(() => asrRequests.delete(card));
+    asrRequests.set(card, promise);
+    return promise;
   }
 
   // ===== LLMテキスト読み込み =====
@@ -1147,11 +1225,13 @@
     if (!llmFile) return;
     const preEl = card.querySelector('.llm-text');
     if (!preEl) return;
+    const started = uiNow();
     try {
       const r = await fetch('/api/llm/history/item/' + encodeURIComponent(llmFile));
       const j = await r.json();
       if (!j || !j.ok) throw new Error(j?.error || 'failed');
       preEl.textContent = j.summary || '(空)';
+      log(`[perf] summary fetch_ms=${(uiNow() - started).toFixed(1)}`);
 
       // 選択ハイライト更新
       const sel = card.querySelector('.llm-history-select');
@@ -1271,7 +1351,7 @@
   }
 
   // ===== 患者切替（手動入力） =====
-  async function switchPatientById(pid, forceCreate = false) {
+  async function switchPatientById(pid, forceCreate = false, chartBranch = null) {
     pid = (pid || '').trim();
     if (!pid) return;
     try {
@@ -1280,13 +1360,12 @@
       const r = await fetch('/api/patient/switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ patient_id: pid, create_new: createNew })
+        body: JSON.stringify({ patient_id: pid, chart_branch: chartBranch, create_new: createNew })
       });
       const j = await r.json();
       if (!j.ok) throw new Error(j.error || String(r.status));
       log(`[patient] switched -> ${pid} session=${j.session_txt} resumed=${j.resumed}`);
-      currentPatientId = pid;
-      currentSessionTxt = j.session_txt || '';
+      selectPatientContext(j.patient_id || pid, j.chart_branch ?? null, j.session_txt || '');
       ensureRecentPatientOption(pid);
 
       // ★ ここを変更：選択後は入力欄を空に戻す
@@ -1299,10 +1378,7 @@
         patientSelectEl.value = pid;
       }
 
-      await loadPatientSessions(pid, { autoShowLatest: true });
-      // タイムライン内でASRテキストを読み込む
-      await loadAllCardAsrText();
-      await loadRecentPatients();
+      await refreshPatientAfterSwitch(pid);
     } catch (e) {
       log(`[patient] switch failed: ${e}`);
     } finally {
@@ -1310,12 +1386,12 @@
     }
   }
 
-  // タイムライン上の全カードのASRを読み込む
+  // 開いているASR欄を更新し、折りたたまれた過去本文は取得しない。
   async function loadAllCardAsrText() {
     if (!karteTimeline) return;
     const cards = karteTimeline.querySelectorAll('.karte-card');
     for (const card of cards) {
-      await loadAsrText(card, card.dataset.session);
+      if (card.querySelector('.asr-section')?.open) await loadAsrText(card, card.dataset.session);
     }
   }
 
@@ -1362,7 +1438,7 @@
     if (msg.type === 'recording_control') applyRecordingControl(msg);
     if (msg.type === 'auto_recording_start') {
       void queueRecordingOperation(() => startRecording({ automatic: true,
-        requestId: msg.request_id, patientId: msg.patient_id }));
+        requestId: msg.request_id, patientId: msg.patient_id, chartBranch: msg.chart_branch ?? null }));
     }
     if (msg.type === 'auto_recording_stop') {
       void queueRecordingOperation(async () => {
@@ -1373,17 +1449,15 @@
     if (msg.type === 'level' && levelEl) levelEl.textContent = msg.dbfs;
 
     if (msg.type === 'status') {
-      if (msg.patient_id) currentPatientId = msg.patient_id;
-      if (msg.session_txt) currentSessionTxt = msg.session_txt;
+      selectPatientContext(msg.patient_id || '', msg.chart_branch ?? null, msg.session_txt || '');
+      switchViewRefresh = null; // Reconnects must see updates made while disconnected.
       log('[status] ' + msg.msg + (msg.session_txt ? ' session=' + msg.session_txt : ''));
-      if (currentPatientId) loadPatientSessions(currentPatientId, { autoShowLatest: true })
-        .then(() => loadAllCardAsrText());
+      if (currentPatientId) void refreshPatientAfterSwitch(currentPatientId);
     }
 
     if (msg.type === 'patient_changed') {
-      currentPatientId = msg.patient_id || '';
-      currentSessionTxt = msg.session_txt || '';
-      ensureRecentPatientOption(currentPatientId);
+      const changed = selectPatientContext(msg.patient_id || '', msg.chart_branch ?? null, msg.session_txt || '');
+      ensureRecentPatientOption(currentPatientId, msg.patient_info);
       // ナビ表示も同期
       if (patientInputEl) {
         patientInputEl.value = '';
@@ -1399,11 +1473,11 @@
         void recoverRecordingPipeline('patient changed (preventive audio refresh)');
       }
 
-      if (currentPatientId && currentSessionTxt) {
+      if (changed && currentPatientId && currentSessionTxt) {
         renderOptimisticPatientSwitch(currentPatientId, currentSessionTxt, msg.patient_info);
       }
 
-      schedulePatientSessionRefresh(currentPatientId, { autoShowLatest: true });
+      void refreshPatientAfterSwitch(currentPatientId);
     }
 
     if (msg.type === 'saved') {
@@ -1692,29 +1766,31 @@
   }
 
   // ===== 録音: WS接続は使い回し、音声キャプチャのみ開始 =====
-  async function startRecording({ automatic = false, requestId = '', patientId = '' } = {}) {
+  async function startRecording({ automatic = false, requestId = '', patientId = '', chartBranch = null } = {}) {
     if (isRecording) return;
     let granted = false;
     try {
-      if (automatic && (!autoRecordingWanted || patientId !== currentPatientId)) return;
+      if (automatic && (!autoRecordingWanted || patientId !== currentPatientId || chartBranch !== currentChartBranch)) return;
       let targetPid = automatic ? patientId : (patientInputEl?.value || '').trim();
       if (!targetPid) {
         targetPid = currentPatientId || 'unknown';
       }
       if (targetPid !== currentPatientId || !currentSessionTxt) {
-        await switchPatientById(targetPid, true);
+        await switchPatientById(targetPid, true, targetPid === currentPatientId ? currentChartBranch : null);
       }
+      const targetBranch = currentChartBranch;
 
       if (!navigator.mediaDevices?.getUserMedia) {
         throw new Error('getUserMedia unavailable');
       }
       await ensureWsOpen();
-      const response = await requestRecordingStart(requestId, targetPid);
+      const response = await requestRecordingStart(requestId, targetPid, targetBranch);
       if (!response.granted) throw new Error(response.error || '録音を開始できませんでした。');
       granted = true;
       await createAudioPipeline();
 
-      if (automatic && (!autoRecordingWanted || patientId !== currentPatientId)) {
+      if (targetPid !== currentPatientId || targetBranch !== currentChartBranch ||
+          (automatic && !autoRecordingWanted)) {
         await cleanupAudioCapture();
         ws.send(JSON.stringify({ command: 'recording_end' }));
         return;
@@ -1786,7 +1862,6 @@
       // 停止後にセッション一覧をリフレッシュ
       if (currentPatientId) {
         await loadPatientSessions(currentPatientId, { autoShowLatest: true });
-        await loadAllCardAsrText();
       }
       log('recording stop');
       if (recordingSettings?.enabled) notifyRecording(reason === 'time_limit' ? '設定時間に達したため録音を停止しました。' : '録音を停止しました。');
@@ -1822,6 +1897,7 @@
     });
   }
   if (patientSelectEl) {
+    patientSelectEl.addEventListener('focus', () => { void loadRecentPatients(); });
     patientSelectEl.addEventListener('change', () => {
       const pid = (patientSelectEl.value || '').trim();
       if (!pid) return;

@@ -184,6 +184,7 @@ class RecordingControlTests(unittest.IsolatedAsyncioTestCase):
             fresh.write_text("2,new", encoding="cp932")
             with patch.object(app_module, "list_dyna_files", side_effect=[
                     [old], [old], [fresh], asyncio.CancelledError()]), \
+                 patch.object(app_module, "DYNA_ID_INCLUDES_BRANCH", False), \
                  patch.object(app_module, "save_patient_info"), \
                  patch.object(app_module, "delete_all_dyna_files"), \
                  patch.object(app_module, "_do_patient_switch", new_callable=AsyncMock) as switch, \

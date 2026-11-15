@@ -362,6 +362,10 @@ class LauncherApp:
         row += 1
         self._add_path_entry(parent, "dyna_watch_dir", "ID監視フォルダ", ("dyna_watch_dir",), row=row, select="dir")
         row += 1
+        self._add_bool(parent, "dyna_id_includes_branch", "電子カルテからのカルテNoに枝番を含む（末尾1桁）", ("dyna_id_includes_branch",), row=row)
+        row += 1
+        ttk.Label(parent, text="ダイナミクス側の出力設定と合わせてください。変更後はサーバーを再起動してください。", wraplength=650).grid(row=row, column=0, columnspan=3, sticky="w", pady=4)
+        row += 1
         self._add_path_entry(parent, "outputs_dir", "セッション保存先", ("outputs_dir",), row=row, select="dir")
         row += 1
         self._add_path_entry(parent, "wav_dir", "WAV保存先", ("wav_dir",), row=row, select="dir")

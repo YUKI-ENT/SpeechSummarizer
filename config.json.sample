@@ -3,6 +3,7 @@
 
   "dyna_watch_dir": "D:/DynaID",
   "dyna_glob": "dyna*.txt",
+  "dyna_id_includes_branch": false,
   "delete_after_read": true,
 
   "auto_recording": {

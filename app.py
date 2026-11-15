@@ -18,6 +18,7 @@ import re
 import shutil
 import tempfile
 import uuid
+import threading
 from typing import Any, Dict, List, Optional
 from app_version import APP_VERSION
 from asr_providers import asr_model_label, create_asr_provider
@@ -25,9 +26,10 @@ from llm_openai_compat import build_openai_base_url, list_openai_models, openai_
 from memo_ai_prompts import normalize_memo_ai_settings
 from memo_templates import load_memo_templates
 from auto_recording import normalize_auto_recording, within_schedule, RecordingSession
+from session_store import SessionIndex, parse_session_name, decode_chart_id
 
 import numpy as np
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body, Request
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse, JSONResponse
 from tools.analysis_tools.app import app as analysis_tools_app
@@ -152,6 +154,26 @@ ensure_dir(WAV_DIR)
 ensure_dir(MEMO_OUTPUTS_DIR)
 ensure_file_from_sample(MEMO_TEMPLATES_PATH)
 PATIENT_DATA_PATH.parent.mkdir(parents=True, exist_ok=True)
+
+_SESSION_INDEX = None
+_SESSION_INDEX_LOCK = threading.RLock()
+
+
+def get_session_index() -> SessionIndex:
+    global _SESSION_INDEX
+    # Also keeps isolated/test data roots from sharing an index.
+    with _SESSION_INDEX_LOCK:
+        if (_SESSION_INDEX is None or _SESSION_INDEX.outputs_dir != OUTPUTS_DIR
+                or _SESSION_INDEX.llm_dir != LLM_DIR):
+            index = SessionIndex(OUTPUTS_DIR, LLM_DIR)
+            index.reconcile()
+            _SESSION_INDEX = index
+        return _SESSION_INDEX
+
+
+def index_session_event(path, obj):
+    if obj.get("type") in {"session_start", "approved"}:
+        get_session_index().record_event(Path(path), obj)
 
 CORRECTION_RULES_PATH = resolve_relpath(CFG.get("correction_rules_path", "corrections.json"))
 CORRECTIONS_DIR = resolve_relpath(CFG.get("corrections_dir", "data/corrections"))
@@ -389,6 +411,7 @@ def append_jsonl_line(jsonl_path: Path, obj: dict):
     s = json.dumps(obj, ensure_ascii=False)
     with jsonl_path.open("a", encoding="utf-8") as f:
         f.write(s + "\n")
+    index_session_event(jsonl_path, obj)
 
 
 # -------------------------
@@ -409,6 +432,8 @@ def now_stamp() -> str:
 # -------------------------
 CURRENT = {
     "patient_id": None,
+    "chart_branch": None,
+    "source_chart_id": None,
     "session_stamp": None,
     "text_path": None,
     "jsonl_path": None,
@@ -454,6 +479,7 @@ def append_jsonl(obj: dict, jsonl_path: str):
     line = json.dumps(obj, ensure_ascii=False)
     with open(jsonl_path, "a", encoding="utf-8") as f:
         f.write(line + "\n")
+    index_session_event(jsonl_path, obj)
 
 
 def append_text_line(text_path: str, s: str):
@@ -468,13 +494,28 @@ def ensure_unknown_session():
     elif not has_paths:
         # Patient is known but session files are not assigned yet.
         # Start a fresh session to avoid None-path writes.
-        new_session(pid)
+        new_session(pid, CURRENT.get("chart_branch"), CURRENT.get("source_chart_id"))
 
-def new_session(patient_id: str):
+def new_session(patient_id: str, chart_branch: int | None = None, source_chart_id: str | None = None):
     stamp = now_stamp()
-    txt = OUTPUTS_DIR / f"{patient_id}_{stamp}.txt"
-    js  = OUTPUTS_DIR / f"{patient_id}_{stamp}.jsonl"
+    prefix = patient_id if chart_branch is None else f"{patient_id}_b{chart_branch}"
+    stem = f"{prefix}_{stamp}"
+    # Exclusive creation prevents rapid same-second switches from merging sessions.
+    while True:
+        txt = OUTPUTS_DIR / f"{stem}.txt"
+        js = OUTPUTS_DIR / f"{stem}.jsonl"
+        if js.exists():
+            stem = f"{prefix}_{stamp}_c{uuid.uuid4().hex}"
+            continue
+        try:
+            with txt.open("x", encoding="utf-8"):
+                pass
+            break
+        except FileExistsError:
+            stem = f"{prefix}_{stamp}_c{uuid.uuid4().hex}"
     CURRENT["patient_id"] = patient_id
+    CURRENT["chart_branch"] = chart_branch
+    CURRENT["source_chart_id"] = source_chart_id
     CURRENT["session_stamp"] = stamp
     CURRENT["text_path"] = str(txt)
     CURRENT["jsonl_path"] = str(js)
@@ -494,6 +535,9 @@ def new_session(patient_id: str):
             "type": "session_start",
             "ts": now_iso(),
             "patient_id": patient_id,
+            "chart_branch": chart_branch,
+            "source_chart_id": source_chart_id,
+            "session_id": stem,
             "stamp": stamp,
             "meta": session_meta,
         },
@@ -550,11 +594,12 @@ def resolve_asr_target(target: dict, *, require_existing: bool = True) -> dict:
         jsonl_path = OUTPUTS_DIR / f"{target_id}.jsonl"
         if require_existing and (not text_path.is_file() or not jsonl_path.is_file()):
             raise FileNotFoundError(f"session not found: {target_id}")
-        parsed = re.match(r"^(?P<pid>.+)_(?P<stamp>\d{8}_\d{6})$", target_id)
-        patient_id = parsed.group("pid") if parsed else "unknown"
+        parsed = parse_session_name(text_path.name)
+        patient_id = parsed["patient_id"] if parsed else "unknown"
         return {
             **normalized,
             "patient_id": patient_id,
+            "chart_branch": parsed["chart_branch"] if parsed else None,
             "text_path": text_path,
             "jsonl_path": jsonl_path,
             "wav_dir": WAV_DIR,
@@ -573,15 +618,12 @@ def resolve_asr_target(target: dict, *, require_existing: bool = True) -> dict:
 def _today_yyyymmdd() -> str:
     return datetime.datetime.now().strftime("%Y%m%d")
 
-def find_latest_session_txt_for_patient_today(patient_id: str) -> str | None:
+def find_latest_session_txt_for_patient_today(patient_id: str, chart_branch: int | None = None) -> str | None:
     """
     outputs_dir から「同一患者・同一日」の最新セッション(txt)を探す。
     例: 123456_20260303_101010.txt のような命名を前提。
     """
-    ymd = _today_yyyymmdd()
-    pat = f"{patient_id}_{ymd}_*.txt"
-    files = sorted(OUTPUTS_DIR.glob(pat), key=lambda p: p.stat().st_mtime, reverse=True)
-    return files[0].name if files else None
+    return get_session_index().latest_today(patient_id, chart_branch, _today_yyyymmdd())
 
 def append_resume_marker(*, txt_path: str, jsonl_path: str, patient_id: str, stamp: str):
     ts = datetime.datetime.now()
@@ -738,11 +780,11 @@ def _safe_name(s: str) -> str:
     s = re.sub(r"[^0-9A-Za-z._-]+", "_", s)
     return s[:120] if len(s) > 120 else s
 
-def _session_from_jsonl_name(path: Path) -> Dict[str, str]:
-    m = re.match(r"^(?P<pid>.+)_(?P<stamp>\d{8}_\d{6})\.jsonl$", path.name)
-    if not m:
+def _session_from_jsonl_name(path: Path) -> dict[str, Any]:
+    info = parse_session_name(path.name)
+    if not info:
         return {"patient_id": CURRENT.get("patient_id") or "unknown", "stamp": CURRENT.get("session_stamp") or ""}
-    return {"patient_id": m.group("pid"), "stamp": m.group("stamp")}
+    return info
 
 def generate_llm_text(*, model: str, prompt: str, timeout_sec: float,
                       temperature: float, top_p: float) -> str:
@@ -832,12 +874,10 @@ def collect_asr_text_from_jsonl(jsonl_path: Path, *, min_quality: str = "good", 
     return "\n".join(lines)
 
 def save_llm_summary(*, jsonl_path: Path, model: str, prompt_id: str, summary: str) -> str:
-    info = _session_from_jsonl_name(jsonl_path)
-    pid = info.get("patient_id", "unknown")
-    stamp = info.get("stamp", "")
-    fname = f"{pid}_{stamp}__{_safe_name(model)}__{_safe_name(prompt_id)}__{now_stamp()}.txt"
+    fname = f"{jsonl_path.stem}__{_safe_name(model)}__{_safe_name(prompt_id)}__{now_stamp()}.txt"
     out_path = LLM_DIR / fname
     out_path.write_text(summary or "", encoding="utf-8")
+    get_session_index().record_llm(out_path)
     return fname
 
 # ==========================================
@@ -929,8 +969,9 @@ def _has_llm_history_for_prompt(jsonl_path: Path, *, prompt_id: str) -> bool:
 
         # save_llm_summary の命名に合わせる（modelはワイルドカード）
         # {pid}_{stamp}__*__{prompt_id}__*.txt
-        pat = f"{pid}_{stamp}__*__{_safe_name(prompt_id)}__*.txt"
-        return any(LLM_DIR.glob(pat))
+        return any(len(parts := name.split("__")) >= 4 and parts[2] == _safe_name(prompt_id)
+                   for name in get_session_index().llm_history(
+                       session=jsonl_path.with_suffix(".txt").name, limit=None))
     except Exception:
         return False
     
@@ -1400,6 +1441,7 @@ def set_asr_model_by_id(model_id: str) -> tuple[bool, str]:
 DYNA_WATCH_DIR = resolve_relpath(CFG.get("dyna_watch_dir", "data/SpeechID"))
 DYNA_GLOB = CFG.get("dyna_glob", "dyna*.txt")
 DYNA_DELETE_AFTER_READ = bool(CFG.get("delete_after_read", True))
+DYNA_ID_INCLUDES_BRANCH = bool(CFG.get("dyna_id_includes_branch", False))
 
 def list_dyna_files() -> list[Path]:
     if not DYNA_WATCH_DIR.exists():
@@ -1443,8 +1485,9 @@ def read_patient_id_from_dyna(path: Path) -> dict | None:
         if not parts:
             return None
             
-        pid = parts[0].strip()
-        if not pid.isdigit():
+        try:
+            identity = decode_chart_id(parts[0], DYNA_ID_INCLUDES_BRANCH)
+        except ValueError:
             return None
             
         name = parts[1].strip() if len(parts) > 1 else ""
@@ -1453,7 +1496,7 @@ def read_patient_id_from_dyna(path: Path) -> dict | None:
         dob = parts[4].strip() if len(parts) > 4 else ""
         
         return {
-            "patient_id": pid,
+            **identity,
             "name": name,
             "kana": kana,
             "gender": gender,
@@ -1556,6 +1599,8 @@ async def handle_recording_command(ws, st, command):
             error = "別の画面で録音中です。"
         elif command.get("patient_id") != CURRENT["patient_id"]:
             error = "患者が切り替わったため、録音を開始しませんでした。"
+        elif command.get("chart_branch", CURRENT.get("chart_branch")) != CURRENT.get("chart_branch"):
+            error = "枝番が切り替わったため、録音を開始しませんでした。"
         elif request_id and (request_id != rec.request_id or not rec.auto_enabled or
                              time.monotonic() > rec.request_deadline or
                              command.get("patient_id") != CURRENT["patient_id"] or
@@ -1582,6 +1627,7 @@ async def request_auto_recording(pid):
     rec.request_id = uuid.uuid4().hex
     rec.request_deadline = time.monotonic() + 15
     await ws.send_json({"type": "auto_recording_start", "patient_id": pid,
+                        "chart_branch": CURRENT.get("chart_branch"),
                         "request_id": rec.request_id})
 
 
@@ -1692,7 +1738,9 @@ async def dyna_watch_task():
                 save_patient_info(pinfo)
                 # 録音中の患者遷移では即座に新規セッションを確定し、
                 # UIへ session_txt を載せて通知する。
-                await _do_patient_switch(pid, create_new=any_client_recording())
+                await _do_patient_switch(pid, create_new=any_client_recording(),
+                                         chart_branch=pinfo["chart_branch"],
+                                         source_chart_id=pinfo["source_chart_id"])
                 if fresh_event:
                     await request_auto_recording(pid)
 
@@ -1707,6 +1755,24 @@ async def dyna_watch_task():
 # -------------------------
 STATIC_DIR = resolve_relpath("static")
 app = FastAPI()
+
+
+@app.middleware("http")
+async def history_response_timing(request: Request, call_next):
+    path = request.url.path
+    measured = (path in {"/api/sessions", "/api/patient/switch"}
+                or (path.startswith("/api/patient/") and path.endswith("/sessions"))
+                or path.startswith("/api/llm/history/item/"))
+    started = time.perf_counter()
+    response = await call_next(request)
+    if measured:
+        elapsed = (time.perf_counter() - started) * 1000
+        response.headers["Server-Timing"] = f"app;dur={elapsed:.1f}"
+        route = getattr(request.scope.get("route"), "path", path)
+        log(f"[PERF] {request.method} {route} server_ms={elapsed:.1f}")
+    return response
+
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 so_labeler_app.state.default_data_dir = str(OUTPUTS_DIR.parent)
@@ -1790,22 +1856,16 @@ app.mount("/so-labeler", so_labeler_app)
 # -------------------------
 # データ表示
 # -------------------------
-SESSION_TXT_RE = re.compile(r"^(?P<patient_id>[^_]+)_(?P<stamp>\d{8}_\d{6})\.txt$")
-
 def _parse_session_name(name: str):
-    m = SESSION_TXT_RE.match(name)
-    if not m:
+    info = parse_session_name(name) if name.endswith(".txt") else None
+    if info is None:
         return None
-    return m.group("patient_id"), m.group("stamp")
+    return info["patient_id"], info["stamp"]
 
 def _list_session_txt_files() -> list[Path]:
     # Sort by the timestamp embedded in the filename so non-content updates
     # do not reshuffle the legacy/basic session list.
-    return sorted(
-        OUTPUTS_DIR.glob("*.txt"),
-        key=lambda p: (_parse_session_name(p.name) or ("", ""))[1],
-        reverse=True,
-    )
+    return [OUTPUTS_DIR / row["name"] for row in get_session_index().sessions()]
 
 # =========================================
 # Phase 1: カルテビュー用ヘルパー
@@ -1840,48 +1900,21 @@ def list_patient_sessions(pid: str) -> list[dict]:
     患者IDに紐づく全セッション一覧を返す。
     各セッションにLLMファイル一覧・承認済みファイル名を付加。
     """
-    pat = f"{pid}_????????_??????.txt"
-    # Sort by session timestamp embedded in filename (YYYYMMDD_HHMMSS),
-    # not file mtime, so metadata updates do not reorder timeline cards.
-    files = sorted(
-        OUTPUTS_DIR.glob(pat),
-        key=lambda p: (_parse_session_name(p.name) or ("", ""))[1],
-        reverse=True
-    )
     current_txt = CURRENT.get("text_path")
     current_name = Path(current_txt).name if current_txt else None
-
     result = []
-    for f in files:
-        info = _parse_session_name(f.name)
-        if not info:
-            continue
-        _pid, stamp = info
-        if _pid != pid:
-            continue
-
-        date_str = f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}"
-        time_str = f"{stamp[9:11]}:{stamp[11:13]}"
-
-        jsonl_path = (OUTPUTS_DIR / f.name.replace(".txt", ".jsonl")).resolve()
-        approved_file = get_approved_llm_file(jsonl_path) if jsonl_path.exists() else None
-
-        llm_pat = f"{pid}_{stamp}__*.txt"
-        llm_files = sorted(
-            LLM_DIR.glob(llm_pat),
-            key=lambda p: p.stat().st_mtime,
-            reverse=True
-        )
-        llm_file_names = [lf.name for lf in llm_files]
-
+    for row in get_session_index().sessions(pid):
+        stamp = row["stamp"]
         result.append({
-            "session_txt": f.name,
+            "session_txt": row["name"],
+            "session_id": Path(row["name"]).stem,
+            "chart_branch": row["chart_branch"],
             "stamp": stamp,
-            "date": date_str,
-            "time": time_str,
-            "is_current": (f.name == current_name),
-            "llm_files": llm_file_names,
-            "approved_file": approved_file,
+            "date": f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}",
+            "time": f"{stamp[9:11]}:{stamp[11:13]}",
+            "is_current": row["name"] == current_name,
+            "llm_files": row["llm_files"],
+            "approved_file": row["approved_file"],
         })
     return result
 
@@ -1890,42 +1923,28 @@ async def api_sessions():
     """
     Returns list of distinct sessions, now injecting patient_info
     """
-    # Sort by session timestamp in filename for stable ordering.
-    files = sorted(
-        OUTPUTS_DIR.glob("*.txt"),
-        key=lambda p: (_parse_session_name(p.name) or ("", ""))[1],
-        reverse=True
-    )
+    started = time.perf_counter()
     items = []
-    seen_pid = set()
-    for f in files:
-        info = _parse_session_name(f.name)
-        if not info:
-            continue
-        pid, stamp = info
-        if pid in seen_pid:
-            continue
-        seen_pid.add(pid)
-        date_str = f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}"
-        time_str = f"{stamp[9:11]}:{stamp[11:13]}"
-        
-        # Inject patient info
-        pinfo = get_patient_info(pid)
-
+    for row in get_session_index().recent_patients():
+        pid, stamp = row["patient_id"], row["stamp"]
         items.append({
             "patient_id": pid,
-            "session_txt": f.name,
-            "date": date_str,
-            "time": time_str,
-            "patient_info": pinfo
+            "session_txt": row["name"],
+            "date": f"{stamp[0:4]}-{stamp[4:6]}-{stamp[6:8]}",
+            "time": f"{stamp[9:11]}:{stamp[11:13]}",
+            "patient_info": get_patient_info(pid),
         })
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    log(f"[HISTORY] source=sqlite recent_patients={len(items)} elapsed_ms={elapsed_ms:.1f}")
     return {"ok": True, "items": items}
 
-async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
+async def _do_patient_switch(pid: str, create_new: bool = True,
+                             chart_branch: int | None = None,
+                             source_chart_id: str | None = None) -> dict:
     """
     患者切替の共通ロジック。
     dyna_watch_task() と POST /api/patient/switch の両方から呼ぶ。
-    既に同じ患者の場合は何もせず現在セッション情報を返す。
+    既に同じ患者・枝番の場合は何もせず現在セッション情報を返す。
     """
     if AUTO_RECORDING["enabled"]:
         for ws, st in list(CLIENTS.items()):
@@ -1933,9 +1952,12 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
                 await expire_recording(ws, st)
 
     # Keep current session only when both session files are already assigned.
-    if CURRENT["patient_id"] == pid and CURRENT.get("text_path") and CURRENT.get("jsonl_path"):
+    previous_pid, previous_branch = CURRENT.get("patient_id"), CURRENT.get("chart_branch")
+    if (CURRENT["patient_id"] == pid and previous_branch == chart_branch
+            and CURRENT.get("text_path") and CURRENT.get("jsonl_path")):
         return {
             "patient_id": pid,
+            "chart_branch": chart_branch,
             "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
             "resumed": False,
             "switched": False,
@@ -1950,7 +1972,7 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
         log(f"[AUTO_LLM] enqueue failed: {e}")
 
     resumed = False
-    today_txt = find_latest_session_txt_for_patient_today(pid)
+    today_txt = find_latest_session_txt_for_patient_today(pid, chart_branch)
     if today_txt:
         info = _parse_session_name(today_txt)
         if info:
@@ -1959,6 +1981,8 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
             jsonl_path = (OUTPUTS_DIR / today_txt.replace(".txt", ".jsonl")).resolve()
             if txt_path.exists() and jsonl_path.exists():
                 CURRENT["patient_id"] = _pid
+                CURRENT["chart_branch"] = chart_branch
+                CURRENT["source_chart_id"] = source_chart_id
                 CURRENT["session_stamp"] = _stamp
                 CURRENT["text_path"] = str(txt_path)
                 CURRENT["jsonl_path"] = str(jsonl_path)
@@ -1972,9 +1996,11 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
 
     if not resumed:
         if create_new:
-            new_session(pid)
+            new_session(pid, chart_branch, source_chart_id)
         else:
             CURRENT["patient_id"] = pid
+            CURRENT["chart_branch"] = chart_branch
+            CURRENT["source_chart_id"] = source_chart_id
             CURRENT["session_stamp"] = None
             CURRENT["text_path"] = None
             CURRENT["jsonl_path"] = None
@@ -1982,6 +2008,11 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
 
     for ws, st in list(CLIENTS.items()):
         if st.active_target is None:
+            # A branch change is a new consultation even for the same patient.
+            if st.recording.active and st.recording.patient_id == pid and previous_branch != chart_branch:
+                st.recording.deadline = time.monotonic() + AUTO_RECORDING["stop_after_minutes"] * 60
+            if previous_pid != pid or previous_branch != chart_branch:
+                st.recording.request_id = ""
             st.recording.switch_patient(time.monotonic(), AUTO_RECORDING["stop_after_minutes"], pid)
             if AUTO_RECORDING["enabled"] and st.recording.active:
                 await recording_status(ws, st)
@@ -1991,6 +2022,7 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
     await broadcast({
         "type": "patient_changed",
         "patient_id": pid,
+        "chart_branch": chart_branch,
         "text_path": CURRENT["text_path"],
         "jsonl_path": CURRENT["jsonl_path"],
         "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
@@ -2000,6 +2032,7 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
 
     return {
         "patient_id": CURRENT["patient_id"],
+        "chart_branch": CURRENT.get("chart_branch"),
         "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
         "resumed": resumed,
         "switched": True,
@@ -2025,6 +2058,8 @@ async def api_version():
 @app.on_event("startup")
 async def _startup():
     load_patient_data()
+    log("[INDEX] checking session metadata (transcripts stay in files)")
+    await asyncio.to_thread(get_session_index)
     await refresh_remote_model_info()
     asyncio.create_task(dyna_watch_task())
     asyncio.create_task(recording_deadline_task())
@@ -2214,28 +2249,12 @@ async def api_llm_history(session: str = "", patient_id: str = ""):
     session = (session or "").strip()
     patient_id = (patient_id or "").strip()
 
-    pid = ""
-    stamp = ""
-    if session:
-        m = re.match(r"^(?P<pid>.+)_(?P<stamp>\d{8}_\d{6})\.txt$", session)
-        if m:
-            pid = m.group("pid")
-            stamp = m.group("stamp")
-    if not pid and patient_id:
-        pid = patient_id
-
-    if pid and stamp:
-        pat = f"{pid}_{stamp}__*.txt"
-        files = sorted(LLM_DIR.glob(pat), key=lambda x: x.stat().st_mtime, reverse=True)
-    elif pid:
-        pat = f"{pid}_*__*.txt"
-        files = sorted(LLM_DIR.glob(pat), key=lambda x: x.stat().st_mtime, reverse=True)
-    else:
-        files = []
+    if session and _parse_session_name(session) is None:
+        return JSONResponse({"ok": False, "error": "invalid session"}, status_code=400)
+    files = get_session_index().llm_history(session=session or None, patient_id=patient_id)
 
     items = []
-    for f in files[:200]:
-        name = f.name
+    for name in files:
         parts = name.split("__")
         model = parts[1] if len(parts) > 1 else ""
         prompt = parts[2] if len(parts) > 2 else ""
@@ -2244,7 +2263,10 @@ async def api_llm_history(session: str = "", patient_id: str = ""):
     return {"ok": True, "items": items}
 
 @app.get("/api/llm/history/item/{item_id}")
-async def api_llm_history_item(item_id: str):
+def api_llm_history_item(item_id: str):
+    # File I/O runs in FastAPI's thread pool, so a slow disk does not block
+    # patient changes, WebSockets, or other summary reads on the event loop.
+    started = time.perf_counter()
     item_id = unquote(item_id)
     if "/" in item_id or "\\" in item_id or ".." in item_id:
         return JSONResponse({"ok": False, "error": "invalid id"}, status_code=400)
@@ -2257,6 +2279,7 @@ async def api_llm_history_item(item_id: str):
         return JSONResponse({"ok": False, "error": "invalid path"}, status_code=400)
 
     txt = p.read_text(encoding="utf-8", errors="replace")
+    log(f"[HISTORY] source=file summary_read_ms={(time.perf_counter() - started) * 1000:.1f}")
     return {"ok": True, "summary": txt}
 
 # ★ Phase 1: LLM承認 API
@@ -2272,6 +2295,9 @@ async def api_llm_approve(payload: Dict[str, Any] = Body(...)):
 
     if not session_txt or not llm_file:
         return JSONResponse({"ok": False, "error": "session and llm_file required"}, status_code=400)
+
+    if not llm_file.startswith(Path(session_txt).stem + "__"):
+        return JSONResponse({"ok": False, "error": "LLM file belongs to another session"}, status_code=400)
 
     info = _parse_session_name(session_txt)
     if not info:
@@ -2650,6 +2676,7 @@ def api_sessions_basic():
         items.append({
             "name": p.name,
             "patient_id": patient_id,
+            "chart_branch": parse_session_name(p.name)["chart_branch"],
             "stamp": stamp,
             "label": f"{patient_id} / {stamp[:8]} {stamp[9:11]}:{stamp[11:13]}:{stamp[13:15]}",
         })
@@ -2691,7 +2718,8 @@ def api_session_get(name: str):
         except Exception as e:
             log(f"[SESSION] jsonl read failed: {j}: {e}")
 
-    return {"name": name, "patient_id": patient_id, "stamp": stamp, "text": text, "meta": meta}
+    return {"name": name, "patient_id": patient_id, "stamp": stamp,
+            "chart_branch": parse_session_name(name)["chart_branch"], "text": text, "meta": meta}
 
 @app.post("/api/session/transcript")
 async def api_session_transcript(payload: Dict[str, Any] = Body(...)):
@@ -2969,8 +2997,12 @@ def api_patient_sessions(pid: str):
     pid = (pid or "").strip()
     if not pid:
         return JSONResponse({"ok": False, "error": "patient_id required"}, status_code=400)
+    started = time.perf_counter()
     sessions = list_patient_sessions(pid)
-    return {"ok": True, "patient_id": pid, "sessions": sessions}
+    elapsed_ms = (time.perf_counter() - started) * 1000
+    log(f"[HISTORY] source=sqlite patient_id={pid} sessions={len(sessions)} elapsed_ms={elapsed_ms:.1f}")
+    return {"ok": True, "patient_id": pid, "sessions": sessions,
+            "patient_info": get_patient_info(pid), "query_ms": round(elapsed_ms, 2)}
 
 # ★ Phase 1: 手動カルテNo入力による患者切替 API
 @app.post("/api/patient/switch")
@@ -2984,7 +3016,14 @@ async def api_patient_switch(payload: Dict[str, Any] = Body(...)):
     create_new = payload.get("create_new", True)
     if not pid:
         return JSONResponse({"ok": False, "error": "patient_id required"}, status_code=400)
-    result = await _do_patient_switch(pid, create_new=create_new)
+    # Manual patient selection always uses the base patient ID. Only the EMR
+    # import interprets its number according to dyna_id_includes_branch.
+    branch = payload.get("chart_branch")
+    if branch is not None and (type(branch) is not int or not 0 <= branch <= 9):
+        return JSONResponse({"ok": False, "error": "chart_branch must be 0-9 or null"}, status_code=400)
+    if not re.fullmatch(r"[0-9A-Za-z-]+", pid):
+        return JSONResponse({"ok": False, "error": "invalid patient_id"}, status_code=400)
+    result = await _do_patient_switch(pid, create_new=create_new, chart_branch=branch)
     return {"ok": True, **result}
 
 # -------------------------
@@ -3376,6 +3415,7 @@ async def ws_endpoint(ws: WebSocket, target_type: str = "", target_id: str = "")
             "type": "status",
             "msg": "connected",
             "patient_id": CURRENT["patient_id"],
+            "chart_branch": CURRENT.get("chart_branch"),
             "session_txt": (Path(CURRENT["text_path"]).name if CURRENT.get("text_path") else ""),
             "target": active_target,
         })

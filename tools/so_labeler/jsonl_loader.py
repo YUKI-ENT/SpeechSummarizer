@@ -1,18 +1,17 @@
 from __future__ import annotations
 
 import json
-import re
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Iterable, Optional
+from session_store import parse_session_name
 
 try:
     from .models import AsrEvent
 except ImportError:
     from models import AsrEvent
 
-_JSONL_PATTERN = re.compile(r'^(?P<pid>\d+)_?(?P<stamp>\d{8}_\d{6}).*\.jsonl$', re.IGNORECASE)
 EXCLUDED_JSONL_NAMES = {'patient_data.jsonl'}
 
 
@@ -32,11 +31,11 @@ def _parse_date_text(value: Optional[str]) -> Optional[datetime]:
 
 
 def _extract_session_stamp_from_name(path: Path) -> tuple[Optional[str], Optional[str]]:
-    m = _JSONL_PATTERN.match(path.name)
-    if not m:
+    info = parse_session_name(path.name)
+    if info is None:
         return None, None
-    pid = m.group('pid')
-    stamp = m.group('stamp')
+    pid = info['patient_id']
+    stamp = info['stamp']
     try:
         dt = datetime.strptime(stamp, '%Y%m%d_%H%M%S')
         return dt.isoformat(), pid

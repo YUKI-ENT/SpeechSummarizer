@@ -820,6 +820,16 @@ body.log-shown #btnToggleLog {
   font-size: 11px;
 }
 
+.sidebar-branch, .karte-branch {
+  font-size: 0.75rem;
+  color: var(--muted);
+  white-space: nowrap;
+}
+
+.sidebar-branch {
+  margin-left: auto;
+}
+
 /* --- タイムラインエリア --- */
 .timeline-area {
   min-width: 0;
