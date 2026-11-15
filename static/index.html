@@ -6,7 +6,7 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>SpeechSummarizer</title>
   <link rel="icon" href="/static/favicon.ico" type="image/x-icon">
-  <link rel="stylesheet" href="/static/style.css?v=20260904">
+  <link rel="stylesheet" href="/static/style.css?v=20261115-2">
 </head>
 
 <body>
@@ -40,6 +40,11 @@
       </select>
 
       <!-- 録音ボタン -->
+      <div class="auto-recording-controls">
+        <button id="btnAutoRecording" class="btn btn-sm" type="button" role="switch" aria-checked="false" aria-label="自動開始 OFF" disabled title="次のカルテ連携で自動開始するかを切り替えます">自動</button>
+        <span id="autoRecordingStatus" role="status" aria-live="polite"></span>
+        <button id="btnRecordingNotifications" class="btn btn-sm" type="button" hidden>通知を許可</button>
+      </div>
       <button id="btnRec" class="btn btn-rec" title="録音開始 / 停止">
         <svg class="mic-icon" viewBox="0 0 24 24">
           <path
@@ -178,7 +183,7 @@
   <button id="btnStart" style="display:none"></button>
   <button id="btnStop" style="display:none"></button>
 
-  <script src="/static/common.js?v=20260904"></script>
+  <script src="/static/common.js?v=20261115-2"></script>
 
 </body>
 

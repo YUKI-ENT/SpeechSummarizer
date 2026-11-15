@@ -1344,3 +1344,10 @@ body.log-shown .log-card {
     justify-content: flex-start;
   }
 }
+
+.auto-recording-controls { display: flex; flex-direction: row; align-items: center; gap: 8px; flex-shrink: 0; }
+#btnAutoRecording { min-width: 52px; white-space: nowrap; font-variant-numeric: tabular-nums; }
+#btnRecordingNotifications { white-space: nowrap; }
+#autoRecordingStatus { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
+#btnAutoRecording[aria-checked="false"] { background: rgba(255, 255, 255, 0.05); color: var(--muted); }
+#btnAutoRecording[aria-checked="true"] { background: #166534; border-color: #15803d; color: #fff; }

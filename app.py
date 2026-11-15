@@ -24,6 +24,7 @@ from asr_providers import asr_model_label, create_asr_provider
 from llm_openai_compat import build_openai_base_url, list_openai_models, openai_chat_text
 from memo_ai_prompts import normalize_memo_ai_settings
 from memo_templates import load_memo_templates
+from auto_recording import normalize_auto_recording, within_schedule, RecordingSession
 
 import numpy as np
 from fastapi import FastAPI, WebSocket, WebSocketDisconnect, Body
@@ -132,6 +133,7 @@ def load_config(force_reload: bool = False) -> dict:
     return cfg
 
 CFG = load_config()
+AUTO_RECORDING = normalize_auto_recording(CFG.get("auto_recording"))
 
 
 def ensure_dir(p: Path):
@@ -1404,6 +1406,14 @@ def list_dyna_files() -> list[Path]:
         return []
     return list(DYNA_WATCH_DIR.glob(DYNA_GLOB))
 
+
+def dyna_file_signature(path):
+    try:
+        stat = path.stat()
+        return str(path), stat.st_mtime_ns, stat.st_size
+    except OSError:
+        return None
+
 def pick_latest_dyna_file(paths: list[Path]) -> Path | None:
     if not paths:
         return None
@@ -1493,6 +1503,133 @@ def get_patient_info(pid: str) -> dict | None:
 
 # WSごとのStateを持つ
 CLIENTS: dict[WebSocket, "State"] = {}
+DISCONNECTED_RECORDINGS: dict[str, tuple[RecordingSession, float]] = {}
+
+
+def auto_recording_owner():
+    return next(((ws, st) for ws, st in CLIENTS.items()
+                 if st.recording.auto_enabled), (None, None))
+
+
+async def recording_status(ws, st, **extra):
+    rec = st.recording
+    remaining = max(0, rec.deadline - time.monotonic()) if rec.deadline else None
+    await ws.send_json({
+        "type": "recording_control", "enabled": AUTO_RECORDING["enabled"],
+        "auto_enabled": rec.auto_enabled, "active": rec.active,
+        "within_schedule": within_schedule(AUTO_RECORDING),
+        "remaining_seconds": remaining,
+        "settings": AUTO_RECORDING, **extra,
+    })
+
+
+async def handle_recording_command(ws, st, command):
+    """Only clinical sockets participate; the server grants starts before audio capture."""
+    if st.active_target is not None:
+        return
+    action = command["command"]
+    st.recording_registered = True
+    rec = st.recording
+    if action == "recording_register":
+        client_id = str(command.get("client_id", ""))[:80]
+        if client_id and not st.recording_client_id:
+            st.recording_client_id = client_id
+            saved = DISCONNECTED_RECORDINGS.pop(client_id, None)
+            if saved and saved[1] > time.monotonic():
+                st.recording = rec = saved[0]
+                if rec.expired(time.monotonic()) or command.get("recording") is not True:
+                    rec.stop()
+        requested = command.get("auto_enabled") is True and AUTO_RECORDING["enabled"]
+        owner_ws, _ = auto_recording_owner()
+        conflict = requested and owner_ws is not None and owner_ws is not ws
+        rec.auto_enabled = requested and not conflict
+        if not rec.auto_enabled:
+            rec.request_id = ""
+        await recording_status(ws, st, error="別の画面で自動開始が有効です。" if conflict else "")
+        return
+    if action == "recording_begin":
+        request_id = command.get("request_id", "")
+        error = ""
+        if any(other is not st and (other.recording.active or
+               (other.active_target is None and other.last_audio_rx > time.time() - 2))
+               for other in CLIENTS.values()):
+            error = "別の画面で録音中です。"
+        elif command.get("patient_id") != CURRENT["patient_id"]:
+            error = "患者が切り替わったため、録音を開始しませんでした。"
+        elif request_id and (request_id != rec.request_id or not rec.auto_enabled or
+                             time.monotonic() > rec.request_deadline or
+                             command.get("patient_id") != CURRENT["patient_id"] or
+                             not within_schedule(AUTO_RECORDING)):
+            error = "自動開始の条件が変わったため開始しませんでした。"
+        if not error and not rec.active:
+            rec.begin(time.monotonic(), AUTO_RECORDING["stop_after_minutes"], CURRENT["patient_id"])
+        await recording_status(ws, st, reply_to=command.get("id"), granted=not error, error=error)
+    elif action == "recording_end":
+        rec.stop()
+        await recording_status(ws, st)
+    elif action == "recording_sync":
+        await recording_status(ws, st)
+
+
+async def request_auto_recording(pid):
+    if not within_schedule(AUTO_RECORDING):
+        return
+    ws, st = auto_recording_owner()
+    if st is None or any(other.recording.active for other in CLIENTS.values()):
+        return
+    # Expire delayed start requests, e.g. after a suspended browser wakes up.
+    rec = st.recording
+    rec.request_id = uuid.uuid4().hex
+    rec.request_deadline = time.monotonic() + 15
+    await ws.send_json({"type": "auto_recording_start", "patient_id": pid,
+                        "request_id": rec.request_id})
+
+
+async def finish_expired_recording(st, jsonl_path):
+    await st.asr_q.join()
+    enqueue_auto_llm_for_jsonl(Path(jsonl_path), reason="recording_stop")
+
+
+async def expire_recording(ws, st):
+    # Capture and finalize before yielding, so a patient change cannot redirect audio.
+    st.recording.stop()
+    target = st.capture_target()
+    destination = resolve_asr_target(target)
+    seg = st.finalize_segment(target, st.active_generation)
+    st.reset_audio()
+    if seg:
+        await st.asr_q.put(seg)
+    task = asyncio.create_task(finish_expired_recording(st, destination["jsonl_path"]))
+    task.add_done_callback(lambda t: log(f"[AUTO_REC] stop failed: {t.exception()}")
+                           if not t.cancelled() and t.exception() else None)
+    await ws.send_json({"type": "auto_recording_stop", "reason": "time_limit"})
+
+
+async def recording_deadline_tick():
+    for client_id, (_, expires) in list(DISCONNECTED_RECORDINGS.items()):
+        if expires <= time.monotonic():
+            DISCONNECTED_RECORDINGS.pop(client_id, None)
+    for ws, st in list(CLIENTS.items()):
+        if st.active_target is not None:
+            continue
+        if not getattr(st, "recording_registered", False) and not st.recording.active:
+            continue
+        try:
+            if AUTO_RECORDING["enabled"] and st.recording.expired(time.monotonic()):
+                await expire_recording(ws, st)
+            elif AUTO_RECORDING["enabled"]:
+                await recording_status(ws, st)
+        except Exception as e:
+            log(f"[AUTO_REC] client update failed: {e}")
+
+
+async def recording_deadline_task():
+    while True:
+        try:
+            await recording_deadline_tick()
+        except Exception as e:
+            log(f"[AUTO_REC] deadline error: {e}")
+        await asyncio.sleep(1)
 
 async def broadcast(obj: dict, *, reset_states: bool = False):
     dead: list[WebSocket] = []
@@ -1521,6 +1658,8 @@ def any_client_recording(*, within_sec: float = 2.0) -> bool:
 async def dyna_watch_task():
     log(f"[DYNA] watcher started dir={DYNA_WATCH_DIR} glob={DYNA_GLOB}")
     last_batch_sig = None
+    # Existing files may still select a patient, but must not start the microphone.
+    initial_files = {dyna_file_signature(p) for p in list_dyna_files()}
 
     while True:
         try:
@@ -1535,7 +1674,8 @@ async def dyna_watch_task():
                 continue
 
             st = latest.stat()
-            sig = (str(latest), st.st_mtime, len(paths))
+            fresh_event = (str(latest), st.st_mtime_ns, st.st_size) not in initial_files
+            sig = (str(latest), st.st_mtime_ns, st.st_size, len(paths))
             if sig == last_batch_sig:
                 await asyncio.sleep(0.5)
                 continue
@@ -1553,6 +1693,8 @@ async def dyna_watch_task():
                 # 録音中の患者遷移では即座に新規セッションを確定し、
                 # UIへ session_txt を載せて通知する。
                 await _do_patient_switch(pid, create_new=any_client_recording())
+                if fresh_event:
+                    await request_auto_recording(pid)
 
             await asyncio.sleep(0.5)
 
@@ -1785,6 +1927,11 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
     dyna_watch_task() と POST /api/patient/switch の両方から呼ぶ。
     既に同じ患者の場合は何もせず現在セッション情報を返す。
     """
+    if AUTO_RECORDING["enabled"]:
+        for ws, st in list(CLIENTS.items()):
+            if st.active_target is None and st.recording.expired(time.monotonic()):
+                await expire_recording(ws, st)
+
     # Keep current session only when both session files are already assigned.
     if CURRENT["patient_id"] == pid and CURRENT.get("text_path") and CURRENT.get("jsonl_path"):
         return {
@@ -1833,6 +1980,12 @@ async def _do_patient_switch(pid: str, create_new: bool = True) -> dict:
             CURRENT["jsonl_path"] = None
             CURRENT["full_text"] = ""
 
+    for ws, st in list(CLIENTS.items()):
+        if st.active_target is None:
+            st.recording.switch_patient(time.monotonic(), AUTO_RECORDING["stop_after_minutes"], pid)
+            if AUTO_RECORDING["enabled"] and st.recording.active:
+                await recording_status(ws, st)
+
     log(f"[SESSION] {'resumed' if resumed else 'switched'} patient_id={pid} txt={CURRENT['text_path']} create_new={create_new}")
 
     await broadcast({
@@ -1874,6 +2027,7 @@ async def _startup():
     load_patient_data()
     await refresh_remote_model_info()
     asyncio.create_task(dyna_watch_task())
+    asyncio.create_task(recording_deadline_task())
 
     # Auto LLM worker（逐次キュー処理）
     asyncio.create_task(_auto_llm_worker())
@@ -2858,6 +3012,9 @@ class State:
         self.reset_pending = False
         self.active_target = normalize_asr_target(active_target) if active_target else None
         self.active_generation = 0
+        self.recording = RecordingSession()
+        self.recording_client_id = ""
+        self.recording_registered = False
 
     def capture_target(self) -> dict:
         if self.active_target is not None:
@@ -3240,6 +3397,11 @@ async def ws_endpoint(ws: WebSocket, target_type: str = "", target_id: str = "")
                 except json.JSONDecodeError:
                     await ws.send_json({"type": "error", "where": "ws_command", "error": "invalid JSON"})
                     continue
+                if not isinstance(command, dict):
+                    continue
+                if command.get("command") in {"recording_register", "recording_begin", "recording_end", "recording_sync"}:
+                    await handle_recording_command(ws, st, command)
+                    continue
                 if command.get("command") == "set_generation":
                     try:
                         generation = int(command.get("generation"))
@@ -3264,6 +3426,11 @@ async def ws_endpoint(ws: WebSocket, target_type: str = "", target_id: str = "")
                 continue
 
             data = message.get("bytes") or b""
+            if active_target is None and AUTO_RECORDING["enabled"]:
+                if st.recording.expired(time.monotonic()):
+                    await expire_recording(ws, st)
+                if st.recording.blocked:
+                    continue
             if st.reset_pending:
                 st.reset_pending = False
                 st.reset_audio()
@@ -3354,6 +3521,8 @@ async def ws_endpoint(ws: WebSocket, target_type: str = "", target_id: str = "")
         log("[WS] close")
     finally:
         # ★追加：最後の患者は patient_changed が起きないので、録音停止で auto_llm
+        if active_target is None and st.recording_client_id:
+            DISCONNECTED_RECORDINGS[st.recording_client_id] = (st.recording, time.monotonic() + 60)
         try:
             cur_jsonl = CURRENT.get("jsonl_path")
             if active_target is None and cur_jsonl:

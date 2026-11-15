@@ -14,6 +14,9 @@
   const logEl = document.getElementById('log');
   const levelEl = document.getElementById('level');
   const btnRec = document.getElementById('btnRec');
+  const btnAutoRecording = document.getElementById('btnAutoRecording');
+  const autoRecordingStatusEl = document.getElementById('autoRecordingStatus');
+  const btnRecordingNotifications = document.getElementById('btnRecordingNotifications');
   const selAsrModel = document.getElementById('selAsrModel');
   // const chkHearing = document.getElementById('chkHearing');
   const hearingOverlay = document.getElementById('hearingOverlay');
@@ -55,6 +58,7 @@
   let lastAudioProcessAt = 0;
   let lastAudioChunkSentAt = 0;
   let recoveringAudio = false;
+  let recoveryQueued = false;
   let trackMuteRecoveryTimer = null;
 
   let currentPatientId = '';   // 現在選択中の患者ID
@@ -75,6 +79,129 @@
   let latestAsrSegment = '';
   let patientSessionRefreshTimer = null;
   let flushWaiter = null;
+  const recordingClientId = globalThis.crypto?.randomUUID?.() || `${Date.now()}-${Math.random()}`;
+  let autoRecordingWanted = true;
+  try { autoRecordingWanted = localStorage.getItem('autoRecordingEnabled') !== 'false'; } catch { }
+  let recordingSettings = null;
+  let recordingDeadline = null;
+  let recordingControlReady = false;
+  let recordingFailure = '';
+  let recordingControlState = null;
+  let recordingOperation = Promise.resolve();
+  const recordingReplies = new Map();
+
+  // Serialize start/stop operations, including events arriving during ASR flush.
+  function queueRecordingOperation(operation) {
+    const pending = recordingOperation.then(operation);
+    recordingOperation = pending.catch(e => log('[recording] ' + e));
+    return pending;
+  }
+
+  function registerRecordingControl() {
+    if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({
+      command: 'recording_register', client_id: recordingClientId,
+      auto_enabled: autoRecordingWanted, recording: isRecording,
+    }));
+  }
+
+  async function requestRecordingStart(requestId = '', patientId = '') {
+    const id = `${recordingClientId}-${Date.now()}-${Math.random()}`;
+    return new Promise((resolve, reject) => {
+      const timer = setTimeout(() => {
+        recordingReplies.delete(id);
+        reject(new Error('録音開始の応答がありません。'));
+      }, 10000);
+      recordingReplies.set(id, { resolve: msg => { clearTimeout(timer); resolve(msg); },
+        reject: error => { clearTimeout(timer); reject(error); } });
+      ws.send(JSON.stringify({ command: 'recording_begin', id,
+        request_id: requestId, patient_id: patientId }));
+    });
+  }
+
+  function notifyRecording(message, failure = false) {
+    recordingFailure = failure ? message : '';
+    log('[auto_recording] ' + message);
+    renderAutoRecordingButton(message);
+    if (recordingSettings?.notifications_enabled && 'Notification' in window && Notification.permission === 'granted') {
+      try { new Notification('SpeechSummarizer', { body: message, tag: 'speech-recording' }); } catch { }
+    }
+    if (recordingSettings?.sound_enabled) {
+      try {
+        const ctx = new (window.AudioContext || window.webkitAudioContext)();
+        const osc = ctx.createOscillator(), gain = ctx.createGain();
+        osc.frequency.value = failure ? 330 : 660;
+        gain.gain.value = 0.06;
+        osc.connect(gain); gain.connect(ctx.destination);
+        osc.onended = () => { void ctx.close(); };
+        void ctx.resume().then(() => { osc.start(); osc.stop(ctx.currentTime + (failure ? 0.3 : 0.12)); });
+      } catch { }
+    }
+  }
+
+  function renderAutoRecordingButton(message = '') {
+    const msg = recordingControlState;
+    if (!msg) return;
+    const status = message || msg.error || recordingFailure || (
+      !msg.enabled ? 'スケジュール未設定' : msg.active ? '録音中' :
+      msg.auto_enabled ? (msg.within_schedule ? '自動開始待機中' : '時間外') : '手動開始待機中');
+    let countdown = '';
+    if (msg.enabled && msg.active && msg.remaining_seconds != null) {
+      const seconds = Math.max(0, Math.ceil(msg.remaining_seconds));
+      countdown = ` ${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, '0')}`;
+    }
+    const description = `自動開始 ${msg.auto_enabled ? 'ON' : 'OFF'}：${status}${countdown ? `・残り${countdown.trim()}` : ''}`;
+    if (btnAutoRecording) {
+      btnAutoRecording.disabled = !msg.enabled;
+      btnAutoRecording.setAttribute('aria-checked', String(msg.auto_enabled));
+      btnAutoRecording.textContent = '自動' + countdown;
+      btnAutoRecording.title = description;
+      btnAutoRecording.setAttribute('aria-label', description);
+    }
+    if (autoRecordingStatusEl) autoRecordingStatusEl.textContent = status;
+  }
+
+  function applyRecordingControl(msg) {
+    recordingControlState = msg;
+    recordingSettings = msg.settings;
+    recordingControlReady = true;
+    recordingDeadline = msg.remaining_seconds == null ? null : Date.now() + msg.remaining_seconds * 1000;
+    renderAutoRecordingButton();
+    if (btnRecordingNotifications) btnRecordingNotifications.hidden = !(
+      recordingSettings?.notifications_enabled && 'Notification' in window && Notification.permission === 'default');
+    if (msg.reply_to) {
+      recordingReplies.get(msg.reply_to)?.resolve(msg);
+      recordingReplies.delete(msg.reply_to);
+    } else if (isRecording && msg.enabled && !msg.active) {
+      void queueRecordingOperation(() => stopRecording());
+    }
+    if (msg.error) {
+      autoRecordingWanted = msg.auto_enabled;
+      notifyRecording(msg.error, true);
+    }
+  }
+
+  if (btnAutoRecording) btnAutoRecording.onclick = async () => {
+    autoRecordingWanted = btnAutoRecording.getAttribute('aria-checked') !== 'true';
+    try { localStorage.setItem('autoRecordingEnabled', String(autoRecordingWanted)); } catch { }
+    // Prepare microphone permission and audio playback while the page is visible.
+    if (autoRecordingWanted) {
+      try {
+        const preparation = await navigator.mediaDevices.getUserMedia({ audio: true });
+        preparation.getTracks().forEach(track => track.stop());
+      } catch (e) {
+        autoRecordingWanted = false;
+        try { localStorage.setItem('autoRecordingEnabled', 'false'); } catch { }
+        notifyRecording('マイクを利用できないため自動開始を有効にできません。', true);
+      }
+    }
+    registerRecordingControl();
+  };
+  if (btnRecordingNotifications) btnRecordingNotifications.onclick = async () => {
+    try {
+      await Notification.requestPermission();
+      btnRecordingNotifications.hidden = Notification.permission !== 'default';
+    } catch (e) { log('[notification] ' + e); }
+  };
 
 
   // ===== ログ =====
@@ -1232,6 +1359,17 @@
     let msg;
     try { msg = JSON.parse(ev.data); } catch { return; }
 
+    if (msg.type === 'recording_control') applyRecordingControl(msg);
+    if (msg.type === 'auto_recording_start') {
+      void queueRecordingOperation(() => startRecording({ automatic: true,
+        requestId: msg.request_id, patientId: msg.patient_id }));
+    }
+    if (msg.type === 'auto_recording_stop') {
+      void queueRecordingOperation(async () => {
+        await stopRecording('time_limit');
+      });
+    }
+
     if (msg.type === 'level' && levelEl) levelEl.textContent = msg.dbfs;
 
     if (msg.type === 'status') {
@@ -1317,6 +1455,8 @@
 
     ws.onopen = () => {
       log('[ws] connected');
+      recordingControlReady = false;
+      registerRecordingControl();
       if (isRecording) {
         lastAudioChunkSentAt = Date.now();
         log('[recording] connection restored; recording continues');
@@ -1324,6 +1464,9 @@
     };
     ws.onerror = e => log('[ws] error ' + e);
     ws.onclose = () => {
+      recordingControlReady = false;
+      for (const waiter of recordingReplies.values()) waiter.reject(new Error('接続が切断されました。'));
+      recordingReplies.clear();
       if (flushWaiter) {
         flushWaiter.resolve();
         flushWaiter = null;
@@ -1390,22 +1533,28 @@
       clearTimeout(trackMuteRecoveryTimer);
       trackMuteRecoveryTimer = null;
     }
-    if (procNode) procNode.disconnect();
-    if (srcNode) srcNode.disconnect();
-    if (audioCtx) await audioCtx.close();
-    if (stream) stream.getTracks().forEach(t => {
+    const oldContext = audioCtx, oldStream = stream;
+    const oldProcessor = procNode, oldSource = srcNode;
+    procNode = srcNode = audioCtx = stream = null;
+    if (oldStream) oldStream.getTracks().forEach(t => {
       t.onended = null;
       t.onmute = null;
       t.onunmute = null;
       t.stop();
     });
-    procNode = srcNode = audioCtx = stream = null;
+    if (oldProcessor) { oldProcessor.onaudioprocess = null; oldProcessor.disconnect(); }
+    if (oldSource) oldSource.disconnect();
+    if (oldContext && oldContext.state !== 'closed') await oldContext.close();
   }
 
   async function monitorRecordingHealth() {
     if (!isRecording || recoveringAudio) return;
 
     const now = Date.now();
+    if (recordingSettings?.enabled && recordingDeadline && now >= recordingDeadline) {
+      await queueRecordingOperation(() => stopRecording('time_limit'));
+      return;
+    }
     if (!ws || ws.readyState !== WebSocket.OPEN) {
       await recoverRecordingPipeline('WebSocket unavailable');
       return;
@@ -1427,13 +1576,33 @@
   }
 
   async function createAudioPipeline() {
-    stream = await navigator.mediaDevices.getUserMedia({
+    let mediaTimedOut = false;
+    let mediaTimer;
+    const mediaRequest = navigator.mediaDevices.getUserMedia({
       audio: {
         echoCancellation: false, noiseSuppression: false,
         autoGainControl: false, channelCount: 1, sampleRate: 48000,
       }
+    }).then(result => {
+      if (mediaTimedOut) result.getTracks().forEach(track => track.stop());
+      return result;
     });
+    try {
+      stream = await Promise.race([mediaRequest, new Promise((_, reject) => {
+        mediaTimer = setTimeout(() => {
+          mediaTimedOut = true;
+          reject(new Error('マイクの許可待ちがタイムアウトしました。'));
+        }, 15000);
+      })]);
+    } finally { clearTimeout(mediaTimer); }
     audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
+    let resumeTimer;
+    try {
+      await Promise.race([audioCtx.resume(), new Promise((_, reject) => {
+        resumeTimer = setTimeout(() => reject(new Error('音声入力を開始できません。画面でマイクボタンを押してください。')), 5000);
+      })]);
+    } finally { clearTimeout(resumeTimer); }
+    if (audioCtx.state !== 'running') throw new Error('音声入力を開始するには画面でマイクボタンを押してください。');
     srcNode = audioCtx.createMediaStreamSource(stream);
 
     const chunkSamples = 2400;
@@ -1443,7 +1612,12 @@
     procNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
     procNode.onaudioprocess = ev => {
       lastAudioProcessAt = Date.now();
+      if (recordingSettings?.enabled && recordingDeadline && Date.now() >= recordingDeadline) {
+        void queueRecordingOperation(() => stopRecording('time_limit'));
+        return;
+      }
       if (!ws || ws.readyState !== WebSocket.OPEN) return;
+      if (!recordingControlReady) return;
       const input = ev.inputBuffer.getChannelData(0);
       const merged = new Float32Array(pcmBuf.length + input.length);
       merged.set(pcmBuf);
@@ -1489,7 +1663,14 @@
     }
   }
 
-  async function recoverRecordingPipeline(reason) {
+  function recoverRecordingPipeline(reason) {
+    if (!isRecording || recoveryQueued) return Promise.resolve();
+    recoveryQueued = true;
+    return queueRecordingOperation(() => performRecordingRecovery(reason))
+      .finally(() => { recoveryQueued = false; });
+  }
+
+  async function performRecordingRecovery(reason) {
     if (!isRecording || recoveringAudio) return;
     recoveringAudio = true;
     try {
@@ -1511,9 +1692,12 @@
   }
 
   // ===== 録音: WS接続は使い回し、音声キャプチャのみ開始 =====
-  async function startRecording() {
+  async function startRecording({ automatic = false, requestId = '', patientId = '' } = {}) {
+    if (isRecording) return;
+    let granted = false;
     try {
-      let targetPid = (patientInputEl?.value || '').trim();
+      if (automatic && (!autoRecordingWanted || patientId !== currentPatientId)) return;
+      let targetPid = automatic ? patientId : (patientInputEl?.value || '').trim();
       if (!targetPid) {
         targetPid = currentPatientId || 'unknown';
       }
@@ -1522,11 +1706,23 @@
       }
 
       if (!navigator.mediaDevices?.getUserMedia) {
-        log('ERROR: getUserMedia unavailable.');
-        return;
+        throw new Error('getUserMedia unavailable');
       }
       await ensureWsOpen();
+      const response = await requestRecordingStart(requestId, targetPid);
+      if (!response.granted) throw new Error(response.error || '録音を開始できませんでした。');
+      granted = true;
       await createAudioPipeline();
+
+      if (automatic && (!autoRecordingWanted || patientId !== currentPatientId)) {
+        await cleanupAudioCapture();
+        ws.send(JSON.stringify({ command: 'recording_end' }));
+        return;
+      }
+
+      if (recordingSettings?.enabled && recordingDeadline && Date.now() >= recordingDeadline) {
+        throw new Error('録音開始の待機中に停止期限に達しました。');
+      }
 
       isRecording = true;
       startRecordingWatchdog();
@@ -1547,15 +1743,25 @@
       updateHearingText(liveAsrText || '(音声認識待機中)');
 
       log('recording start');
+      if (recordingSettings?.enabled) notifyRecording(automatic ? '録音を自動開始しました。' : '録音を開始しました。');
     } catch (e) {
+      isRecording = false;
+      stopRecordingWatchdog();
+      await cleanupAudioCapture();
+      renderRecState();
+      if (granted && ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ command: 'recording_end' }));
       log('ERROR: ' + e);
+      notifyRecording('録音開始に失敗しました。マイクと接続を確認してください。', true);
     }
   }
 
-  async function stopRecording() {
+  async function stopRecording(reason = 'manual') {
+    if (!isRecording && !stream) return true;
     try {
       // これだけが録音をOFFにする経路。先に意思状態を落として復旧処理を止める。
       isRecording = false;
+      if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({ command: 'recording_end' }));
+      recordingDeadline = null;
       stopRecordingWatchdog();
       renderRecState();
       if (selAsrModel) selAsrModel.disabled = selAsrModel.dataset.switchable === 'false';
@@ -1583,6 +1789,7 @@
         await loadAllCardAsrText();
       }
       log('recording stop');
+      if (recordingSettings?.enabled) notifyRecording(reason === 'time_limit' ? '設定時間に達したため録音を停止しました。' : '録音を停止しました。');
       return true;
     } catch (e) {
       log('ERROR: ' + e);
@@ -1634,8 +1841,7 @@
   // ===== 録音ボタン =====
   if (btnRec) {
     btnRec.onclick = async () => {
-      if (isRecording) await stopRecording();
-      else await startRecording();
+      await queueRecordingOperation(() => isRecording ? stopRecording() : startRecording());
     };
   }
 
@@ -1645,7 +1851,7 @@
       if (isRecording) {
         const proceed = window.confirm('録音中です。録音を終了して音声メモを開きますか？');
         if (!proceed) return;
-        const stopped = await stopRecording();
+        const stopped = await queueRecordingOperation(() => stopRecording());
         if (!stopped) {
           window.alert('録音を正常に終了できなかったため、音声メモを開きませんでした。');
           return;
@@ -1655,8 +1861,8 @@
     });
   }
   // 旧Start/Stopボタン互換
-  if (btnStart) btnStart.onclick = () => startRecording();
-  if (btnStop) btnStop.onclick = () => stopRecording();
+  if (btnStart) btnStart.onclick = () => queueRecordingOperation(() => startRecording());
+  if (btnStop) btnStop.onclick = () => queueRecordingOperation(() => stopRecording());
 
   // ===== 初期化 =====
   loadAppVersion();

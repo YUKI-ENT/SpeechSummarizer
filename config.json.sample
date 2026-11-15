@@ -5,6 +5,32 @@
   "dyna_glob": "dyna*.txt",
   "delete_after_read": true,
 
+  "auto_recording": {
+    "enabled": false,
+    "stop_after_minutes": 20,
+    "sound_enabled": false,
+    "notifications_enabled": false,
+    "schedule": {
+      "mon": [
+        "09:00-19:00"
+      ],
+      "tue": [
+        "09:00-19:00"
+      ],
+      "wed": [
+        "09:00-19:00"
+      ],
+      "thu": [
+        "09:00-19:00"
+      ],
+      "fri": [
+        "09:00-19:00"
+      ],
+      "sat": [],
+      "sun": []
+    }
+  },
+
   "outputs_dir": "data/sessions",
   "wav_dir": "data/wav",
   "llm_outputs_dir": "data/llm",

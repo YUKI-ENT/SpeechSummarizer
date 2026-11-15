@@ -23,6 +23,7 @@ from launcher_helpers import (
 )
 from memo_ai_prompts import normalize_memo_ai_settings
 from memo_templates import load_memo_templates, save_memo_templates
+from auto_recording import DAYS, DAY_LABELS, default_auto_recording, normalize_auto_recording
 
 
 def get_app_dir() -> Path:
@@ -50,6 +51,7 @@ DEFAULT_HEARING_TRANSLATION_LANGUAGES = [
     {"id": "ko", "label": "韓国語", "name": "Korean"},
 ]
 FIELD_DEFAULTS = {
+    "auto_recording_minutes": 20,
     "memo_templates_path": "./memo_templates.json",
     "hearing_translation_enabled": True,
     "hearing_translation_timeout": 30,
@@ -375,6 +377,21 @@ class LauncherApp:
         self._add_path_entry(parent, "certfile", "SSL certfile", ("ssl", "certfile"), row=row, select="file")
         row += 1
         self._add_path_entry(parent, "keyfile", "SSL keyfile", ("ssl", "keyfile"), row=row, select="file")
+
+        box = ttk.LabelFrame(parent, text="自動開始スケジュール", padding=10)
+        box.grid(row=row + 1, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        box.columnconfigure(1, weight=1)
+        self._add_bool(box, "auto_recording_enabled", "自動開始・時間による自動停止を利用する", ("auto_recording", "enabled"), row=0)
+        self._add_entry(box, "auto_recording_minutes", "患者ごとの自動停止（分）", ("auto_recording", "stop_after_minutes"), kind="float", row=1, width=10)
+        self._add_bool(box, "auto_recording_sound", "開始・停止・失敗を音で通知", ("auto_recording", "sound_enabled"), row=2)
+        self._add_bool(box, "auto_recording_notifications", "デスクトップ通知を利用（Web画面で通知許可が必要）", ("auto_recording", "notifications_enabled"), row=3)
+        ttk.Label(box, text="サーバーの現地時刻。複数時間帯はカンマ区切り、休診日は空欄。\n例: 09:00-12:30, 14:00-19:00 ／ 設定保存後はサーバーを再起動してください。", wraplength=650).grid(row=4, column=0, columnspan=3, sticky="w", pady=6)
+        self.auto_recording_days = {}
+        for index, (day, label) in enumerate(zip(DAYS, DAY_LABELS)):
+            var = tk.StringVar()
+            self.auto_recording_days[day] = var
+            ttk.Label(box, text=f"{label}曜日").grid(row=index + 5, column=0, sticky="w", pady=4)
+            ttk.Entry(box, textvariable=var, width=48).grid(row=index + 5, column=1, columnspan=2, sticky="ew", pady=4)
 
     def _build_asr_tab(self, parent: ttk.Frame) -> None:
         for i in range(4):
@@ -1256,6 +1273,9 @@ class LauncherApp:
             self._set_widget_tree_enabled(self.qwen_settings_box, True)
             self._set_widget_tree_enabled(self.vibevoice_settings_box, True)
         self.cfg = load_config()
+        schedule = self.cfg.get("auto_recording", {}).get("schedule", default_auto_recording()["schedule"])
+        for day, var in self.auto_recording_days.items():
+            var.set(", ".join(schedule.get(day, [])))
         for name, field in self.field_meta.items():
             path = field["path"]
             kind = field["kind"]
@@ -1494,6 +1514,11 @@ class LauncherApp:
                     set_nested(cfg, path, value)
 
             models: dict[str, str] = {}
+            cfg["auto_recording"]["schedule"] = {
+                day: [period.strip() for period in var.get().replace("，", ",").split(",") if period.strip()]
+                for day, var in self.auto_recording_days.items()
+            }
+            cfg["auto_recording"] = normalize_auto_recording(cfg["auto_recording"])
             for id_var, path_var in self.model_rows:
                 model_id = id_var.get().strip()
                 model_path = normalize_path_text(path_var.get())
