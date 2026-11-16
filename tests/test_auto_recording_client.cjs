@@ -305,3 +305,34 @@ test('opening the current ASR section and refreshing it share one in-flight body
     c.history.loadAsrText(card, '1_b0_20261115_090000.txt')]);
   assert.deepEqual(c.fetches, ['/api/session/1_b0_20261115_090000.txt']);
 });
+
+test('late prompt metadata fills existing cards before models arrive and preserves user selection', async () => {
+  let resolveModels;
+  let resolvePrompts;
+  const models = new Promise(resolve => { resolveModels = resolve; });
+  const prompts = new Promise(resolve => { resolvePrompts = resolve; });
+  const response = data => ({ ok: true, json: async () => data });
+  const c = client({ history: true, respond: async url => {
+    if (url === '/api/llm/models') return models;
+    if (url === '/api/llm/prompts') return prompts;
+    return response({ ok: true, sessions: [] });
+  } });
+  await settle();
+  assert.ok(c.fetches.includes('/api/llm/prompts'));
+  const promptSelect = { value: '', innerHTML: '' };
+  const modelSelect = { value: '', innerHTML: '' };
+  c.elements.karteTimeline.cards = [{ querySelector: selector =>
+    selector === '.card-sel-prompt' ? promptSelect : modelSelect }];
+  resolvePrompts(response({ ok: true, default_prompt_id: 'soap', items: [
+    { id: 'soap', label: 'SOAP記録' }, { id: 'letter', label: '紹介状' },
+  ] }));
+  await settle();
+  assert.match(promptSelect.innerHTML, /value="soap">SOAP記録/);
+  assert.match(promptSelect.innerHTML, /value="letter">紹介状/);
+  assert.equal(promptSelect.value, 'soap');
+  promptSelect.value = 'letter';
+  resolveModels(response({ ok: true, models: ['model'], default_model: 'model' }));
+  await settle();
+  assert.match(modelSelect.innerHTML, /value="model"/);
+  assert.equal(promptSelect.value, 'letter');
+});

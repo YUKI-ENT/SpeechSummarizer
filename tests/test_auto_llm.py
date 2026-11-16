@@ -22,7 +22,9 @@ class AutoLLMTests(unittest.IsolatedAsyncioTestCase):
             "AUTO_LLM_PROMPTS": [self.item],
             "_auto_llm_q": self.queue,
             "_auto_llm_enqueued": set(),
+            "OUTPUTS_DIR": Path(directory.name),
             "LLM_DIR": Path(directory.name),
+            "_SESSION_INDEX": None,
         }.items():
             patcher = patch.object(app_module, name, value)
             patcher.start()
@@ -59,6 +61,45 @@ class AutoLLMTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(self.enqueue(), 1)
             self.add_asr("再開後の記録")
             self.assertEqual(self.enqueue(), 0)
+
+    async def test_correction_saves_sent_text_and_preserves_asr_original(self):
+        for existing_txt in (None, "手編集したセキの記録"):
+            with self.subTest(existing_txt=existing_txt):
+                self.path.write_text("", encoding="utf-8")
+                self.add_asr("セキの記録")
+                txt_path = self.path.with_suffix(".txt")
+                if existing_txt is not None:
+                    txt_path.write_text(existing_txt, encoding="utf-8")
+                with (
+                    patch.object(app_module, "load_correction_rules", return_value={
+                        "replacements": {"セキ": "咳"},
+                    }),
+                    patch.object(app_module, "detect_asr_model_from_jsonl", return_value="test-asr"),
+                    patch.object(app_module, "generate_llm_text", return_value="要約") as generate,
+                    patch.object(app_module, "build_prompt_from_cfg", side_effect=lambda _, text: text),
+                    patch.object(app_module, "save_llm_summary", return_value="summary.txt"),
+                ):
+                    await app_module._run_auto_llm_job({
+                        **self.item, "asr_correct": True, "jsonl_path": str(self.path),
+                    })
+
+                expected = (existing_txt or "セキの記録").replace("セキ", "咳")
+                self.assertEqual(generate.call_args.kwargs["prompt"].strip(), expected)
+                self.assertEqual(txt_path.read_text(encoding="utf-8"), expected + "\n")
+                records = [json.loads(line) for line in self.path.read_text(encoding="utf-8").splitlines()]
+                self.assertEqual([r["text"] for r in records if r["type"] == "asr"], ["セキの記録"])
+
+    async def test_sending_without_correction_keeps_txt_unchanged(self):
+        self.add_asr("認識原文")
+        txt_path = self.path.with_suffix(".txt")
+        txt_path.write_text("表示用テキスト\n", encoding="utf-8")
+        with (
+            patch.object(app_module, "generate_llm_text", return_value="要約"),
+            patch.object(app_module, "build_prompt_from_cfg", side_effect=lambda _, text: text),
+            patch.object(app_module, "save_llm_summary", return_value="summary.txt"),
+        ):
+            await app_module._run_auto_llm_job({**self.item, "jsonl_path": str(self.path)})
+        self.assertEqual(txt_path.read_text(encoding="utf-8"), "表示用テキスト\n")
 
     async def test_repeated_notifications_and_non_asr_events_do_not_resend(self):
         self.assertEqual(self.enqueue(), 0)

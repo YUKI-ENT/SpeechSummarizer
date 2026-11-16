@@ -1083,6 +1083,10 @@ async def _run_auto_llm_job(job: dict):
             asr_text, _stats = apply_corrections(asr_text, rules, model_name=session_model)
         except Exception as e:
             log(f"[AUTO_LLM] asr_correct failed: {e}")
+        else:
+            # JSONLのASR原文を維持し、表示用TXTに送信する補正済み文章を保存する。
+            # 録音再開時の追記が最終行につながらないよう、末尾に改行を付ける。
+            txt_path.write_text(asr_text.rstrip("\n") + "\n", encoding="utf-8")
 
     # prompt生成（既存：build_prompt_from_cfg）:contentReference[oaicite:5]{index=5}
     prompt = build_prompt_from_cfg(prompt_id, asr_text)

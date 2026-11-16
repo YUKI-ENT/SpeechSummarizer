@@ -677,6 +677,7 @@
           llmModelList.map(m => `<option value="${e_(m)}">${e_(m)}</option>`).join('');
         if (j.default_model) selLlmModel.value = j.default_model;
       }
+      refreshCardLlmControls();
       if (!j.ok) log(`[ui] LLMモデル一覧を取得できないため既定モデルを使用: ${j.error || r.status}`);
     } catch (e) { log(`[ui] loadLlmModels failed: ${e}`); }
   }
@@ -693,10 +694,30 @@
       llmDefaultPromptId = j.default_prompt_id || '';
       if (selSoapPrompt) {
         selSoapPrompt.innerHTML = '<option value="">Prompt...</option>' +
-          llmPromptList.map(it => `<option value="${it.id}">${it.label || it.id}</option>`).join('');
+          llmPromptList.map(it => `<option value="${e_(it.id)}">${e_(it.label || it.id)}</option>`).join('');
         if (llmDefaultPromptId) selSoapPrompt.value = llmDefaultPromptId;
       }
+      refreshCardLlmControls();
     } catch (e) { log(`[ui] loadLlmPrompts failed: ${e}`); }
+  }
+
+  function refreshCardLlmControls() {
+    karteTimeline?.querySelectorAll('.karte-card').forEach(card => {
+      const modelSelect = card.querySelector('.card-sel-model');
+      if (modelSelect && llmModelList.length) {
+        const selected = modelSelect.value || selLlmModel?.value;
+        modelSelect.innerHTML = llmModelList.map(m =>
+          `<option value="${e_(m)}">${e_(m)}</option>`).join('');
+        if (llmModelList.includes(selected)) modelSelect.value = selected;
+      }
+      const promptSelect = card.querySelector('.card-sel-prompt');
+      if (promptSelect && llmPromptList.length) {
+        const selected = promptSelect.value || selSoapPrompt?.value || llmDefaultPromptId;
+        promptSelect.innerHTML = llmPromptList.map(p =>
+          `<option value="${e_(p.id)}">${e_(p.label || p.id)}</option>`).join('');
+        if (llmPromptList.some(p => p.id === selected)) promptSelect.value = selected;
+      }
+    });
   }
 
   function loadRecentPatients({ force = false } = {}) {
@@ -1943,7 +1964,8 @@
   // ===== 初期化 =====
   loadAppVersion();
   loadAsrModels();
-  loadLlmModels().then(() => loadLlmPrompts());
+  loadLlmModels();
+  loadLlmPrompts();
   loadHearingTranslationSettings();
   loadRecentPatients();
   connectWs();  // ★ 起動時にWS接続（常時接続）
