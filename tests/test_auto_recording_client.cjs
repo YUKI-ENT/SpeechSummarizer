@@ -7,7 +7,7 @@ const path = require('node:path');
 const settle = () => new Promise(resolve => setImmediate(resolve));
 
 function client({ notifications = false, permission = 'default', history = false, patientSelect = false,
-                  respond } = {}) {
+                  respond, microphone, closeAudio, resumeAudio } = {}) {
   const elements = {};
   const fetches = [];
   if (patientSelect) {
@@ -49,6 +49,8 @@ function client({ notifications = false, permission = 'default', history = false
   }
   const storage = new Map();
   const tracks = [];
+  const contexts = [];
+  const timers = new Map();
   let socket;
   let autoEnabled = true;
   let active = false;
@@ -86,10 +88,11 @@ function client({ notifications = false, permission = 'default', history = false
     }
   }
   class AudioContext {
+    constructor() { contexts.push(this); }
     state = 'running';
     destination = {};
-    resume() { return Promise.resolve(); }
-    close() { this.state = 'closed'; return Promise.resolve(); }
+    resume() { return resumeAudio ? resumeAudio(this) : Promise.resolve(); }
+    close() { if (closeAudio) return closeAudio(this); this.state = 'closed'; return Promise.resolve(); }
     createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
     createScriptProcessor() { return { connect() {}, disconnect() {} }; }
   }
@@ -99,6 +102,7 @@ function client({ notifications = false, permission = 'default', history = false
     window: { AudioContext, Notification }, Notification, WebSocket, location: { protocol: 'http:', host: 'localhost' },
     localStorage: { getItem: key => storage.get(key), setItem: (key, value) => storage.set(key, value) },
     navigator: { mediaDevices: { async getUserMedia() {
+      if (microphone) return microphone();
       if (failMicrophone) throw new Error('denied');
       const track = { stopped: false, stop() { this.stopped = true; } };
       tracks.push(track);
@@ -109,15 +113,27 @@ function client({ notifications = false, permission = 'default', history = false
       if (respond) return respond(url, options, socket);
       return { ok: true, json: async () => ({ ok: true, sessions: [] }) };
     },
-    setTimeout, clearTimeout, setInterval: () => 0, clearInterval() {}, console, AbortController,
+    setTimeout(handler, milliseconds) {
+      const id = setTimeout(() => { timers.delete(id); handler(); }, milliseconds);
+      timers.set(id, { handler, milliseconds });
+      return id;
+    },
+    clearTimeout(id) { timers.delete(id); clearTimeout(id); },
+    setInterval: () => 0, clearInterval() {}, console, AbortController,
   };
   const source = fs.readFileSync(path.join(__dirname, '../static/common.js'), 'utf8')
     .replace('  // ===== 初期化 =====',
-      '  window.testHistory = { buildOptimisticSession, renderSidebar, buildCard, loadAllCardAsrText, loadAsrText, switchPatientById, loadPatientSessions, loadRecentPatients };\n  // ===== 初期化 =====');
+      '  window.testHistory = { buildOptimisticSession, renderSidebar, buildCard, loadAllCardAsrText, loadAsrText, switchPatientById, loadPatientSessions, loadRecentPatients, monitorRecordingHealth };\n  // ===== 初期化 =====');
   vm.runInNewContext(source, sandbox);
   socket.onopen();
   socket.receive({ type: 'status', patient_id: '1', session_txt: '1_20261116_090000.txt' });
-  return { elements, socket, tracks, storage, fetches, history: sandbox.window.testHistory,
+  return { elements, socket, tracks, contexts, storage, fetches,
+    expire(milliseconds) {
+      const entry = [...timers].find(([, timer]) => timer.milliseconds === milliseconds);
+      assert.ok(entry, `expected a pending ${milliseconds}ms timeout`);
+      const [id, timer] = entry;
+      clearTimeout(id); timers.delete(id); timer.handler();
+    }, history: sandbox.window.testHistory,
     fail: () => { failMicrophone = true; } };
 }
 
@@ -335,4 +351,92 @@ test('late prompt metadata fills existing cards before models arrive and preserv
   await settle();
   assert.match(modelSelect.innerHTML, /value="model"/);
   assert.equal(promptSelect.value, 'letter');
+});
+
+
+test('a hung audio close releases stop and permits recording again', async () => {
+  const c = client({ closeAudio: () => new Promise(() => {}) });
+  await settle();
+  await c.elements.btnRec.onclick();
+  const stopping = c.elements.btnRec.onclick();
+  await settle();
+  assert.equal(c.elements.btnRec.classList.contains('recording'), false);
+  assert.ok(c.tracks.every(track => track.stopped));
+  c.expire(3000);
+  await stopping;
+  await c.elements.btnRec.onclick();
+  assert.equal(c.elements.btnRec.classList.contains('recording'), true);
+  const finalStop = c.elements.btnRec.onclick();
+  await settle(); c.expire(3000); await finalStop;
+});
+
+test('interrupted audio recovers without waiting on the old context resume', async () => {
+  const c = client({ resumeAudio: ctx => ctx.state === 'interrupted'
+    ? new Promise(() => {}) : Promise.resolve() });
+  await settle();
+  await c.elements.btnRec.onclick();
+  c.contexts[0].state = 'interrupted';
+  await c.history.monitorRecordingHealth();
+  assert.equal(c.contexts.length, 2);
+  assert.equal(c.tracks[0].stopped, true);
+  assert.equal(c.elements.btnRec.classList.contains('recording'), true);
+  await c.elements.btnRec.onclick();
+});
+
+test('a hung resume during recovery does not block a subsequent microphone click', async () => {
+  let hang = false;
+  const c = client({ resumeAudio: () => hang ? new Promise(() => {}) : Promise.resolve() });
+  await settle();
+  await c.elements.btnRec.onclick();
+  hang = true;
+  c.socket.receive({ type: 'patient_changed', patient_id: '1', chart_branch: null,
+    session_txt: '1_20261116_090000.txt' });
+  await settle();
+  const stopping = c.elements.btnRec.onclick();
+  c.expire(5000);
+  await stopping;
+  hang = false;
+  await c.elements.btnRec.onclick();
+  assert.equal(c.elements.btnRec.classList.contains('recording'), true);
+  await c.elements.btnRec.onclick();
+});
+
+test('auto permission timeout remains actionable and stops a late microphone stream', async () => {
+  let resolveMicrophone;
+  const c = client({ microphone: () => new Promise(resolve => { resolveMicrophone = resolve; }) });
+  await settle();
+  await c.elements.btnAutoRecording.onclick(); // OFF
+  await settle();
+  const enabling = c.elements.btnAutoRecording.onclick();
+  await settle();
+  c.expire(15000);
+  await enabling; await settle();
+  assert.equal(c.elements.btnAutoRecording.getAttribute('aria-checked'), 'false');
+  let stopped = false;
+  resolveMicrophone({ getTracks: () => [{ stop() { stopped = true; } }] });
+  await settle();
+  assert.equal(stopped, true);
+});
+
+test('a stalled stop response body times out and releases subsequent starts', async () => {
+  let hang = true;
+  let signal;
+  const c = client({ respond: async (url, options) => {
+    if (url === '/api/auto-llm/enqueue-current' && hang) {
+      signal = options.signal;
+      return { ok: true, json: () => new Promise(() => {}) };
+    }
+    return { ok: true, json: async () => ({ ok: true, sessions: [] }) };
+  } });
+  await settle();
+  await c.elements.btnRec.onclick();
+  const stopping = c.elements.btnRec.onclick();
+  await settle();
+  c.expire(10000);
+  await stopping;
+  assert.equal(signal.aborted, true);
+  hang = false;
+  await c.elements.btnRec.onclick();
+  assert.equal(c.elements.btnRec.classList.contains('recording'), true);
+  await c.elements.btnRec.onclick();
 });

@@ -107,6 +107,49 @@
     return pending;
   }
 
+  // Audio promises can remain pending after device/sleep transitions.
+  // Bound each wait so one stalled operation cannot block later controls.
+  async function withTimeout(promise, milliseconds, message) {
+    let timer;
+    try {
+      return await Promise.race([promise, new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error(message)), milliseconds);
+      })]);
+    } finally { clearTimeout(timer); }
+  }
+
+  async function requestMicrophone(audio) {
+    let expired = false;
+    const request = navigator.mediaDevices.getUserMedia({ audio }).then(result => {
+      if (expired) result.getTracks().forEach(track => track.stop());
+      return result;
+    });
+    try {
+      return await withTimeout(request, 15000, 'マイクの許可待ちがタイムアウトしました。');
+    } catch (e) {
+      expired = true;
+      throw e;
+    }
+  }
+
+  async function recordingJson(url, options = {}) {
+    const controller = new AbortController();
+    const abort = () => controller.abort();
+    if (options.signal?.aborted) controller.abort();
+    options.signal?.addEventListener('abort', abort, { once: true });
+    try {
+      return await withTimeout((async () => {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        const result = await response.json();
+        if (!response.ok) throw new Error(result.error || String(response.status));
+        return result;
+      })(), 10000, `通信がタイムアウトしました: ${url}`);
+    } finally {
+      options.signal?.removeEventListener('abort', abort);
+      controller.abort();
+    }
+  }
+
   function registerRecordingControl() {
     if (ws?.readyState === WebSocket.OPEN) ws.send(JSON.stringify({
       command: 'recording_register', client_id: recordingClientId,
@@ -196,7 +239,7 @@
     // Prepare microphone permission and audio playback while the page is visible.
     if (autoRecordingWanted) {
       try {
-        const preparation = await navigator.mediaDevices.getUserMedia({ audio: true });
+        const preparation = await requestMicrophone(true);
         preparation.getTracks().forEach(track => track.stop());
       } catch (e) {
         autoRecordingWanted = false;
@@ -468,13 +511,12 @@
     if (!sessionTxt) return;
     if (sessionTxt === hearingLastSavedSession && normalized === hearingLastSavedText) return;
     try {
-      const r = await fetch('/api/session/transcript', {
+      const j = await recordingJson('/api/session/transcript', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ session: sessionTxt, text: normalized })
       });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error || String(r.status));
+      if (!j.ok) throw new Error(j.error || 'リクエストに失敗しました。');
       hearingLastSavedSession = sessionTxt;
       hearingLastSavedText = normalized;
     } catch (e) {
@@ -797,10 +839,9 @@
     const promise = (async () => {
       const started = uiNow();
       try {
-        const r = await fetch(`/api/patient/${encodeURIComponent(pid)}/sessions`, { signal: controller.signal });
-        const j = await r.json();
+        const j = await recordingJson(`/api/patient/${encodeURIComponent(pid)}/sessions`, { signal: controller.signal });
         const received = uiNow();
-        if (!r.ok || !j?.ok) throw new Error(j?.error || String(r.status));
+        if (!j?.ok) throw new Error(j?.error || '履歴の取得に失敗しました。');
         if (pid !== currentPatientId || generation !== patientSessionsGeneration) return false;
         ensureRecentPatientOption(pid, j.patient_info);
         renderSidebar(pid, j.sessions || [], j.patient_info || null);
@@ -1228,9 +1269,7 @@
     if (!preEl) return Promise.resolve();
     const promise = (async () => {
       try {
-        const r = await fetch('/api/session/' + encodeURIComponent(sessionTxt));
-        const j = await r.json();
-        if (!r.ok) throw new Error(j?.error || String(r.status));
+        const j = await recordingJson('/api/session/' + encodeURIComponent(sessionTxt));
         preEl.textContent = j.text || '(テキストなし)';
         card.dataset.asrLoaded = 'true';
       } catch (e) {
@@ -1378,13 +1417,12 @@
     try {
       if (btnSwitchPatient) btnSwitchPatient.disabled = true;
       const createNew = isRecording || forceCreate;
-      const r = await fetch('/api/patient/switch', {
+      const j = await recordingJson('/api/patient/switch', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ patient_id: pid, chart_branch: chartBranch, create_new: createNew })
       });
-      const j = await r.json();
-      if (!j.ok) throw new Error(j.error || String(r.status));
+      if (!j.ok) throw new Error(j.error || 'リクエストに失敗しました。');
       log(`[patient] switched -> ${pid} session=${j.session_txt} resumed=${j.resumed}`);
       selectPatientContext(j.patient_id || pid, j.chart_branch ?? null, j.session_txt || '');
       ensureRecentPatientOption(pid);
@@ -1639,7 +1677,11 @@
     });
     if (oldProcessor) { oldProcessor.onaudioprocess = null; oldProcessor.disconnect(); }
     if (oldSource) oldSource.disconnect();
-    if (oldContext && oldContext.state !== 'closed') await oldContext.close();
+    if (oldContext && oldContext.state !== 'closed') {
+      try {
+        await withTimeout(oldContext.close(), 3000, '音声入力の終了がタイムアウトしました。');
+      } catch (e) { log('[audio] cleanup failed: ' + e); }
+    }
   }
 
   async function monitorRecordingHealth() {
@@ -1655,13 +1697,10 @@
       return;
     }
 
-    if (audioCtx && audioCtx.state === 'suspended') {
-      try {
-        await audioCtx.resume();
-        log('[audio] resumed suspended audio context');
-      } catch (e) {
-        log('[audio] resume failed: ' + e);
-      }
+    // Recovery is serialized with manual start/stop and owns all audio waits.
+    if (audioCtx && audioCtx.state !== 'running') {
+      await recoverRecordingPipeline(`audio context ${audioCtx.state}`);
+      return;
     }
 
     const lastActiveAt = Math.max(lastAudioProcessAt, lastAudioChunkSentAt);
@@ -1671,32 +1710,13 @@
   }
 
   async function createAudioPipeline() {
-    let mediaTimedOut = false;
-    let mediaTimer;
-    const mediaRequest = navigator.mediaDevices.getUserMedia({
-      audio: {
-        echoCancellation: false, noiseSuppression: false,
-        autoGainControl: false, channelCount: 1, sampleRate: 48000,
-      }
-    }).then(result => {
-      if (mediaTimedOut) result.getTracks().forEach(track => track.stop());
-      return result;
+    stream = await requestMicrophone({
+      echoCancellation: false, noiseSuppression: false,
+      autoGainControl: false, channelCount: 1, sampleRate: 48000,
     });
-    try {
-      stream = await Promise.race([mediaRequest, new Promise((_, reject) => {
-        mediaTimer = setTimeout(() => {
-          mediaTimedOut = true;
-          reject(new Error('マイクの許可待ちがタイムアウトしました。'));
-        }, 15000);
-      })]);
-    } finally { clearTimeout(mediaTimer); }
     audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 48000 });
-    let resumeTimer;
-    try {
-      await Promise.race([audioCtx.resume(), new Promise((_, reject) => {
-        resumeTimer = setTimeout(() => reject(new Error('音声入力を開始できません。画面でマイクボタンを押してください。')), 5000);
-      })]);
-    } finally { clearTimeout(resumeTimer); }
+    await withTimeout(audioCtx.resume(), 5000,
+      '音声入力を開始できません。画面でマイクボタンを押してください。');
     if (audioCtx.state !== 'running') throw new Error('音声入力を開始するには画面でマイクボタンを押してください。');
     srcNode = audioCtx.createMediaStreamSource(stream);
 
@@ -1752,10 +1772,6 @@
 
     lastAudioProcessAt = Date.now();
     lastAudioChunkSentAt = Date.now();
-
-    if (audioCtx.state === 'suspended') {
-      await audioCtx.resume();
-    }
   }
 
   function recoverRecordingPipeline(reason) {
@@ -1829,8 +1845,7 @@
       let existingAsr = '';
       if (currentSessionTxt) {
         try {
-          const r = await fetch('/api/session/' + encodeURIComponent(currentSessionTxt));
-          const j = await r.json();
+          const j = await recordingJson('/api/session/' + encodeURIComponent(currentSessionTxt));
           if (j.text) existingAsr = j.text.trim();
         } catch (e) { }
       }
@@ -1863,14 +1878,13 @@
       renderRecState();
       if (selAsrModel) selAsrModel.disabled = selAsrModel.dataset.switchable === 'false';
 
-      await flushHearingTranscriptSave();
       await cleanupAudioCapture();
+      await flushHearingTranscriptSave();
       await flushAsrQueue();
       // ★ WSは閉じない（常時接続を維持してpatient_changedを受信し続ける）
 
       try {
-        const r = await fetch('/api/auto-llm/enqueue-current', { method: 'POST' });
-        const j = await r.json();
+        const j = await recordingJson('/api/auto-llm/enqueue-current', { method: 'POST' });
         if (j?.ok && j.enqueued) {
           log(`[auto_llm] enqueued on stop: ${j.jsonl || ''}`);
         } else if (j?.ok) {
