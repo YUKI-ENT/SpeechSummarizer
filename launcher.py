@@ -332,6 +332,7 @@ class LauncherApp:
         notebook.pack(fill="both", expand=True)
 
         general_tab = ScrollableTab(notebook, padding=12)
+        schedule_tab = ScrollableTab(notebook, padding=12)
         asr_tab = ScrollableTab(notebook, padding=12)
         llm_tab = ScrollableTab(notebook, padding=12)
         hearing_translation_tab = ScrollableTab(notebook, padding=12)
@@ -339,6 +340,7 @@ class LauncherApp:
         memo_templates_tab = ScrollableTab(notebook, padding=12)
 
         notebook.add(general_tab, text="一般")
+        notebook.add(schedule_tab, text="スケジュール")
         notebook.add(asr_tab, text="ASR")
         notebook.add(llm_tab, text="LLM")
         notebook.add(hearing_translation_tab, text="難聴翻訳")
@@ -346,6 +348,7 @@ class LauncherApp:
         notebook.add(memo_templates_tab, text="メモ定型文")
 
         self._build_general_tab(general_tab.content)
+        self._build_schedule_tab(schedule_tab.content)
         self._build_asr_tab(asr_tab.content)
         self._build_llm_tab(llm_tab.content)
         self._build_hearing_translation_tab(hearing_translation_tab.content)
@@ -362,9 +365,9 @@ class LauncherApp:
         row += 1
         self._add_path_entry(parent, "dyna_watch_dir", "ID監視フォルダ", ("dyna_watch_dir",), row=row, select="dir")
         row += 1
-        self._add_bool(parent, "dyna_id_includes_branch", "電子カルテからのカルテNoに枝番を含む（末尾1桁）", ("dyna_id_includes_branch",), row=row)
+        self._add_bool(parent, "dyna_id_includes_branch", "枝番あり", ("dyna_id_includes_branch",), row=row)
         row += 1
-        ttk.Label(parent, text="ダイナミクス側の出力設定と合わせてください。変更後はサーバーを再起動してください。", wraplength=650).grid(row=row, column=0, columnspan=3, sticky="w", pady=4)
+        ttk.Label(parent, text="枝番ありの場合は、ダイナミクスの他社連携で『枝番あり』に設定し、サーバーを再起動してください", wraplength=650).grid(row=row, column=0, columnspan=3, sticky="w", pady=4)
         row += 1
         self._add_path_entry(parent, "outputs_dir", "セッション保存先", ("outputs_dir",), row=row, select="dir")
         row += 1
@@ -382,8 +385,12 @@ class LauncherApp:
         row += 1
         self._add_path_entry(parent, "keyfile", "SSL keyfile", ("ssl", "keyfile"), row=row, select="file")
 
+    def _build_schedule_tab(self, parent: ttk.Frame) -> None:
+        for i in range(3):
+            parent.columnconfigure(i, weight=1)
+
         box = ttk.LabelFrame(parent, text="自動開始スケジュール", padding=10)
-        box.grid(row=row + 1, column=0, columnspan=3, sticky="ew", pady=(14, 0))
+        box.grid(row=0, column=0, columnspan=3, sticky="ew")
         box.columnconfigure(1, weight=1)
         self._add_bool(box, "auto_recording_enabled", "自動開始・時間による自動停止を利用する", ("auto_recording", "enabled"), row=0)
         self._add_entry(box, "auto_recording_minutes", "患者ごとの自動停止（分）", ("auto_recording", "stop_after_minutes"), kind="float", row=1, width=10)
